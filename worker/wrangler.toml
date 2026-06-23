@@ -15,8 +15,8 @@ RUNNERS = '["https://r1.bigfleet-demo.lucy.sh"]'
 # preview_id is only used by remote `wrangler dev`; local dev simulates KV, so it can stay as-is.
 [[kv_namespaces]]
 binding = "SESSIONS"
-id = "REPLACE_WITH_KV_ID"
-preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+id = "1bc60c4b633d4655ae3450ca8ac5aafb"
+preview_id = "1bc60c4b633d4655ae3450ca8ac5aafb"
 
 # Bind the worker to the public hostname (after the lucy.sh zone + DNS record exist).
 # Uncomment and set your zone:
