@@ -7,7 +7,7 @@ compatibility_date = "2025-07-18"
 # runner(s); leaving the placeholder deploys fine but the worker has no capacity to assign.
 # Entries may be strings or { "url": "...", "name": "..." } objects.
 [vars]
-RUNNERS = '["https://r1-bigfleet-demo.lucy.sh"]'
+RUNNERS = '["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]'
 
 # KV: ip -> session assignment (auto-expires at session end). REQUIRED — the build FAILS until
 # `id` is a real namespace id from YOUR account. Create it once:
