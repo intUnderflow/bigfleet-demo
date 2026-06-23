@@ -1,16 +1,18 @@
-name = "bigfleet-demo-coordinator"
+# name must match the Worker created in the Cloudflare dashboard / Workers Builds project.
+name = "bigfleet-demo"
 main = "src/index.ts"
 compatibility_date = "2025-07-18"
 
-# Runner base URLs — each a demohost daemon behind an HTTPS tunnel. Edit to your runners.
+# Runner base URLs — each a demohost daemon behind an HTTPS tunnel. Replace with your real
+# runner(s); leaving the placeholder deploys fine but the worker has no capacity to assign.
 # Entries may be strings or { "url": "...", "name": "..." } objects.
 [vars]
 RUNNERS = '["https://r1.bigfleet-demo.lucy.sh"]'
 
-# KV: ip -> session assignment (auto-expires at session end). Create the namespace with:
-#   npx wrangler kv namespace create SESSIONS
-#   npx wrangler kv namespace create SESSIONS --preview
-# then paste the returned ids below.
+# KV: ip -> session assignment (auto-expires at session end). REQUIRED — the build FAILS until
+# `id` is a real namespace id from YOUR account. Create it once:
+#   npx wrangler kv namespace create SESSIONS      # -> prints the id; paste it below
+# preview_id is only used by remote `wrangler dev`; local dev simulates KV, so it can stay as-is.
 [[kv_namespaces]]
 binding = "SESSIONS"
 id = "REPLACE_WITH_KV_ID"
