@@ -49,8 +49,13 @@ for c in "${CLUSTERS[@]}"; do
   start "$c-node-creator.log" "$BIN/node-creator" --kubeconfig="$RUN/$c.kubeconfig"
 done
 
-log "starting Kubernetes dashboards (one per cluster — real apiservers, fully functional)"
-bash "$HACK_DIR/demo-dashboards.sh" || true
+if [ "$DASHBOARDS" = "1" ]; then
+  log "starting Kubernetes dashboards (one per cluster — real apiservers, fully functional)"
+  bash "$HACK_DIR/demo-dashboards.sh" || true
+else
+  log "dashboards disabled (DASHBOARDS=0) — keeping the session lean"
+  : > "$RUN/dashboards"
+fi
 
 # session descriptor for the backend
 {
@@ -59,24 +64,32 @@ bash "$HACK_DIR/demo-dashboards.sh" || true
   echo "  \"workspaces\": ["
   for idx in "${!CLUSTERS[@]}"; do
     c="${CLUSTERS[$idx]}"; comma=","; [ "$idx" -eq $(( ${#CLUSTERS[@]} - 1 )) ] && comma=""
-    dash=$(grep "^$c " "$RUN/dashboards" 2>/dev/null | awk '{print $2}')
+    # || true: with dashboards off the file is empty, and grep-no-match (1) would trip set -e
+    dash=$(grep "^$c " "$RUN/dashboards" 2>/dev/null | awk '{print $2}' || true)
     echo "    {\"name\": \"$c\", \"kubeconfig\": \"$RUN/$c.kubeconfig\", \"dashboard\": \"$dash\"}$comma"
   done
   echo "  ]"
   echo "}"
 } > "$RUN/session.json"
 
-log "starting demo backend + UI on :8090"
-start backend.log "$BIN/demo-backend" --session "$RUN/session.json" --ui "$REPO_ROOT/ui" --addr :8090 \
-  --onprem-size "$ONPREM_SIZE" --cloud-size "$CLOUD_SIZE" --fleet-size "$FLEET_SIZE" \
-  --cloud-node-hourly "$CLOUD_NODE_HOURLY"
+log "starting demo backend + UI on $BACKEND_ADDR"
+# Build args as an array so the optional session-clock flags splice in cleanly (the
+# ${VAR:+ "..."} form mangles quoting). The clock flags are only added for a hosted
+# session (SESSION_ID set by demohost); the standalone local demo passes none.
+backend_args=( --session "$RUN/session.json" --ui "$REPO_ROOT/ui" --addr "$BACKEND_ADDR"
+  --onprem-size "$ONPREM_SIZE" --cloud-size "$CLOUD_SIZE" --fleet-size "$FLEET_SIZE"
+  --cloud-node-hourly "$CLOUD_NODE_HOURLY" )
+[ -n "$SESSION_ID" ] && backend_args+=( --session-id "$SESSION_ID" )
+[ -n "${SESSION_TTL:-}" ] && backend_args+=( --session-ttl "$SESSION_TTL" )
+[ -n "${SESSION_IDLE_TIMEOUT:-}" ] && backend_args+=( --idle-timeout "$SESSION_IDLE_TIMEOUT" )
+start backend.log "$BIN/demo-backend" "${backend_args[@]}"
 sleep 2
 
 log "demo stack up."
 cat >&2 <<EOF
 
   ┌────────────────────────────────────────────────────────────┐
-  │  Open the demo:   http://localhost:8090                     │
+  │  Open the demo:   http://localhost:$BACKEND_PORT
   │  Real apiservers + stock kube-scheduler (native priority &  │
   │  preemption) + kwok nodes, with BigFleet moving capacity.   │
   └────────────────────────────────────────────────────────────┘

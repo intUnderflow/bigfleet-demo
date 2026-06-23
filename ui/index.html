@@ -32,6 +32,32 @@
   .honesty-strip{font-size:11.5px;color:var(--muted);margin-left:auto}
   .honesty-strip b{color:var(--sim);font-weight:600}
 
+  /* hosted-session bar — only shown when the backend reports a session clock (the
+     standalone local demo has none). Live countdown to the session's deadline; goes
+     amber under 5 min and red under 1 min. */
+  .sessionbar{display:none;flex:0 0 auto;align-items:center;gap:9px;flex-wrap:wrap;
+    padding:7px 20px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:500}
+  .sessionbar.show{display:flex}
+  .sessionbar.warn{background:var(--sim);color:#241a04}
+  .sessionbar.crit{background:var(--bad);color:#fff}
+  .sessionbar .clock{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums}
+  .sessionbar .sb-note{margin-left:auto;opacity:.88;font-weight:400}
+  .sessionbar .sb-dot{width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.95;
+    animation:sbpulse 2s infinite}
+  @keyframes sbpulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.5)}70%{box-shadow:0 0 0 6px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
+
+  /* session-ended overlay (deadline reached, or the host reaped the session) */
+  .ended{display:none;position:fixed;inset:0;z-index:50;background:rgba(10,11,14,.86);
+    align-items:center;justify-content:center;padding:20px}
+  .ended.show{display:flex}
+  .ended .card{max-width:430px;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:26px 28px;text-align:center;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+  .ended h3{margin:0 0 8px;font-size:18px;color:var(--ink)}
+  .ended p{margin:0 0 16px;font-size:13.5px;color:var(--muted);line-height:1.6}
+  .ended button{background:var(--accent);color:#fff;border:0;border-radius:9px;
+    padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer}
+  .ended button:hover{filter:brightness(1.08)}
+
   .layout{flex:1 1 auto;display:grid;grid-template-columns:clamp(380px,38%,520px) 1fr;min-height:0}
   .doc,.live{overflow-y:auto;min-height:0;padding:22px 26px 60px}
   .doc{border-right:1px solid var(--line);background:var(--bg-2)}
@@ -136,6 +162,11 @@
 </style>
 </head>
 <body>
+  <div class="sessionbar" id="sessionbar">
+    <span class="sb-dot"></span>
+    <span>Temporary live demo session — ends in <span class="clock" id="sessionclock">—:—</span></span>
+    <span class="sb-note" id="sessionnote">free &amp; ephemeral · up to 1 hour, or ~5 min after you close this tab</span>
+  </div>
   <div class="topbar">
     <a class="brand" href="https://bigfleet.lucy.sh">
       <svg viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
@@ -451,6 +482,64 @@ function scenario(name){ post('/api/scenario',{name:name}); }
 function resetDemo(){ post('/api/reset',{}); }
 function openDash(ws){ const c=(last.clusters||[]).find(x=>x.name===ws); if(c&&c.dashboard){ window.open(c.dashboard,'_blank'); } else { alert('dashboard for '+ws+' is still starting — try again in a moment'); } }
 function post(u,b){ fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); }
+
+// ── Hosted-session clock ─────────────────────────────────────────────────────
+// A hosted session (created by demohost) runs for up to an hour and is reaped a few
+// minutes after the tab goes idle. We poll /api/session for the deadline, show a live
+// countdown in the top bar, and POST /api/heartbeat while the tab is visible so the
+// host knows someone is still here. When the deadline passes (or the host reaps us),
+// we show the "session ended" overlay. The standalone local demo reports hosted:false
+// and none of this shows. The countdown tracks the HARD 1h deadline — the idle clock
+// is just the reaper, and a visible tab keeps resetting it, so it never the headline.
+(function(){
+  let hardEndsAt=null;     // local ms timestamp of the hard deadline
+  let hosted=false, ended=false;
+  const bar=document.getElementById('sessionbar');
+  const clockEl=document.getElementById('sessionclock');
+  const noteEl=document.getElementById('sessionnote');
+  const overlay=document.getElementById('ended');
+
+  function showEnded(){
+    if(ended) return; ended=true;
+    bar.classList.remove('show');
+    overlay.classList.add('show');
+    try{ es.close(); }catch(_){}
+  }
+  function fmt(s){ s=Math.max(0,Math.round(s)); const m=Math.floor(s/60); return m+':'+String(s%60).padStart(2,'0'); }
+
+  async function sync(){
+    let st;
+    try{ st=await (await fetch('/api/session',{cache:'no-store'})).json(); }
+    catch(_){ if(hosted&&!ended) showEnded(); return; }   // host likely reaped us
+    if(!st.hosted){ hosted=false; bar.classList.remove('show'); return; }
+    hosted=true; bar.classList.add('show');
+    if(st.expired){ showEnded(); return; }
+    // anchor the hard deadline locally from same-payload server fields (no clock skew)
+    const hardRemainingMs=Date.parse(st.hardDeadline)-Date.parse(st.now);
+    hardEndsAt=Date.now()+hardRemainingMs;
+  }
+
+  function tick(){
+    if(!hosted||ended||hardEndsAt==null) return;
+    const rem=(hardEndsAt-Date.now())/1000;
+    if(rem<=0){ showEnded(); return; }
+    clockEl.textContent=fmt(rem);
+    bar.classList.toggle('warn', rem<=300 && rem>60);
+    bar.classList.toggle('crit', rem<=60);
+    if(rem<=300) noteEl.textContent='wrapping up soon — reload any time for a fresh session';
+  }
+
+  async function heartbeat(){
+    if(!hosted||ended||document.visibilityState!=='visible') return;
+    try{ await fetch('/api/heartbeat',{method:'POST'}); }catch(_){}
+  }
+
+  sync();                                   // initial: hosted? deadline?
+  setInterval(tick,1000);                   // 1s countdown
+  setInterval(sync,60000);                  // resync (drift + server-side expiry/reap)
+  setInterval(heartbeat,20000);             // keep-alive while visible
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'){ heartbeat(); sync(); } });
+})();
 </script>
 </body>
 </html>

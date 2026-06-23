@@ -20,6 +20,9 @@ kubeconfig*
 *.kubeconfig
 /tmp/
 session-state/
+# demohost coordinator key — generated locally, mirrored to the repo's GitHub Actions
+# secret DEMOHOST_KEY; never committed.
+/secrets/
 
 # Local research / design notes — working notes, not part of the shipped repo
 /docs/research/

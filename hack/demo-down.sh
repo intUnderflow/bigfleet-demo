@@ -5,15 +5,19 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/demo-common.sh"
 if [ -f "$RUN/pids" ]; then
   while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$RUN/pids"
 fi
-# belt-and-suspenders — match however each was launched (abs path, ./bin, or $BIN),
-# so a manually-restarted process (e.g. a backend started outside run/pids) is killed too.
-for b in node-creator fakecloud-provider shard operator upc demo-backend; do
-  pkill -f "bin/$b" 2>/dev/null || true
-done
-# stop the per-cluster dashboards
-for c in "${CLUSTERS[@]}"; do docker rm -f "dash-$c" >/dev/null 2>&1 || true; done
-# delete the real clusters (kwokctl removes their containers)
-for c in "${CLUSTERS[@]}"; do kwokctl delete cluster --name "$c" >/dev/null 2>&1 || true; done
+# belt-and-suspenders for the SINGLE-session local demo only — match however each was
+# launched, so a manually-restarted process (started outside run/pids) is killed too.
+# NEVER do this when SESSION_ID is set: sessions share the bin/ dir, so a broad pkill
+# would tear down sibling sessions. There, $RUN/pids is the authoritative process list.
+if [ -z "$SESSION_ID" ]; then
+  for b in node-creator fakecloud-provider shard operator upc demo-backend; do
+    pkill -f "bin/$b" 2>/dev/null || true
+  done
+fi
+# stop the per-cluster dashboards + delete the real clusters (kwokctl removes their
+# containers) — by GLOBAL name so only THIS session's clusters/containers are removed.
+for c in "${CLUSTERS[@]}"; do docker rm -f "dash-$(kwokname "$c")" >/dev/null 2>&1 || true; done
+for c in "${CLUSTERS[@]}"; do kwokctl delete cluster --name "$(kwokname "$c")" >/dev/null 2>&1 || true; done
 sleep 1
 rm -rf "$RUN"
 log "demo stack down."

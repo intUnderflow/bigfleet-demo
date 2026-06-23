@@ -1,0 +1,13 @@
+{
+  "name": "bigfleet-demo-coordinator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that assigns demo visitors (by IP) to BigFleet demo sessions on capacity-aware runners.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

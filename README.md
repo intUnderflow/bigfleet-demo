@@ -42,6 +42,26 @@ hack/demo-observe.sh                    # snapshot the fleet by tier + the shard
 
 The full guided walkthrough is the **[demo tour on the docs site](https://bigfleet.lucy.sh/demo)**.
 
+## Run it at scale (hosted, many sessions)
+
+`demohost` runs many isolated sessions on one machine — the program that powers a public,
+shared deployment. Every session is the full stack above on its own port block; each runs for
+**up to an hour** and is reaped a few minutes after its tab closes. Creation is gated by a
+secret key (the **central coordinator** model), and the host **reserves a fixed memory budget
+to demos and refuses anything that would exceed it**.
+
+```sh
+export DEMOHOST_KEY=$(cat secrets/demohost.key)   # generated locally; mirrored to the GH Actions secret
+./bin/demohost serve --demo-memory-mb 16384 --session-memory-mb 2048 --max-sessions 8
+./bin/demohost create        # → a session URL, valid for an hour
+./bin/demohost capacity      # machine RAM / budget / measured usage / headroom
+```
+
+The public front door is a **Cloudflare Worker** (`worker/`, at `bigfleet-demo-api.lucy.sh`) that
+assigns each visitor IP to a session on a runner with capacity and re-assigns when a session
+ends. Full operator guide: **[docs/operating-the-host.md](docs/operating-the-host.md)**;
+coordinator: **[worker/README.md](worker/README.md)**.
+
 ## How it's built
 
 `kwokctl` clusters (real apiserver + stock `kube-scheduler` + kwok nodes) ← per-cluster operator / UPC /

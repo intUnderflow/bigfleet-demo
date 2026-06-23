@@ -219,6 +219,84 @@ func dashHandler(prefix, target, token string) http.Handler {
 	return rp
 }
 
+// sessionClock bounds a HOSTED demo session: a hard wall-clock deadline (default 1h)
+// and an idle timeout (default 5m) measured from the last browser heartbeat. The UI
+// reads /api/session to render the top-bar countdown and POSTs /api/heartbeat while
+// its tab is open; the demohost reaper polls /api/session and tears the session down
+// when it reports expired (and enforces the hard cap itself too, as a backstop). The
+// standalone local demo passes no --session-id, so clock is nil and there is no bar.
+type sessionClock struct {
+	id           string
+	startedAt    time.Time
+	hardDeadline time.Time
+	idleTimeout  time.Duration
+	mu           sync.Mutex
+	lastBeat     time.Time
+}
+
+func newSessionClock(id string, ttl, idle time.Duration, now time.Time) *sessionClock {
+	return &sessionClock{id: id, startedAt: now, hardDeadline: now.Add(ttl), idleTimeout: idle, lastBeat: now}
+}
+
+func (s *sessionClock) beat(now time.Time) { s.mu.Lock(); s.lastBeat = now; s.mu.Unlock() }
+
+type sessionStatus struct {
+	Hosted           bool   `json:"hosted"`
+	ID               string `json:"id"`
+	StartedAt        string `json:"startedAt"`
+	HardDeadline     string `json:"hardDeadline"`
+	IdleDeadline     string `json:"idleDeadline"`
+	ExpiresAt        string `json:"expiresAt"`     // whichever of the two comes first
+	ExpiresReason    string `json:"expiresReason"` // "scheduled" (1h cap) | "idle" (tab gone)
+	Now              string `json:"now"`
+	RemainingSeconds int    `json:"remainingSeconds"`
+	Expired          bool   `json:"expired"`
+}
+
+func (s *sessionClock) snapshot(now time.Time) sessionStatus {
+	s.mu.Lock()
+	last := s.lastBeat
+	s.mu.Unlock()
+	idleDeadline := last.Add(s.idleTimeout)
+	exp, reason := s.hardDeadline, "scheduled"
+	if idleDeadline.Before(exp) {
+		exp, reason = idleDeadline, "idle"
+	}
+	rem := int(exp.Sub(now).Seconds())
+	if rem < 0 {
+		rem = 0
+	}
+	return sessionStatus{
+		Hosted: true, ID: s.id,
+		StartedAt:    s.startedAt.UTC().Format(time.RFC3339),
+		HardDeadline: s.hardDeadline.UTC().Format(time.RFC3339),
+		IdleDeadline: idleDeadline.UTC().Format(time.RFC3339),
+		ExpiresAt:    exp.UTC().Format(time.RFC3339), ExpiresReason: reason,
+		Now: now.UTC().Format(time.RFC3339), RemainingSeconds: rem,
+		Expired: now.After(s.hardDeadline) || now.After(idleDeadline),
+	}
+}
+
+func sessionHandler(clock *sessionClock) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if clock == nil { // standalone local demo — no session clock, no top bar
+			_ = json.NewEncoder(w).Encode(sessionStatus{Hosted: false})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(clock.snapshot(time.Now()))
+	}
+}
+
+func heartbeatHandler(clock *sessionClock) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if clock != nil {
+			clock.beat(time.Now())
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func main() {
 	sessionPath := flag.String("session", "run/session.json", "path to the session descriptor")
 	addr := flag.String("addr", ":8090", "listen address")
@@ -230,8 +308,17 @@ func main() {
 	cloudHourly := flag.Float64("cloud-node-hourly", 0.38, "illustrative $/hr per PROVISIONED 8vCPU/32GiB on-demand cloud node — author-chosen constant, NOT a cloud quote")
 	spotHourly := flag.Float64("spot-node-hourly", 0.11, "illustrative $/hr per PROVISIONED spot cloud node (cheaper, interruptible) — author-chosen constant, NOT a cloud quote")
 	nodeBudget := flag.Int("node-budget-cpu", 7000, "millicores of pod requests one demand 'level' unit maps to (~one 8-core node's schedulable cpu); demand L ≈ L nodes' worth, which BigFleet packs onto ~L machines")
+	sessionID := flag.String("session-id", "", "hosted-session id (set by demohost); empty = standalone local demo with no session clock / top bar")
+	sessionTTL := flag.Duration("session-ttl", time.Hour, "hosted session hard wall-clock lifetime")
+	idleTimeout := flag.Duration("idle-timeout", 5*time.Minute, "hosted session tear-down delay after the browser tab stops sending heartbeats")
 	flag.Parse()
 	nodeBudgetMilli = *nodeBudget
+
+	var clock *sessionClock
+	if *sessionID != "" {
+		clock = newSessionClock(*sessionID, *sessionTTL, *idleTimeout, time.Now())
+		fmt.Printf("demo-backend: hosted session %q — ttl=%s idle=%s\n", *sessionID, *sessionTTL, *idleTimeout)
+	}
 
 	sess := loadSession(*sessionPath)
 	scheme := runtime.NewScheme()
@@ -284,6 +371,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stream", hub.serveSSE)
+	mux.HandleFunc("/api/session", sessionHandler(clock))
+	mux.HandleFunc("/api/heartbeat", heartbeatHandler(clock))
 	mux.HandleFunc("/api/demand", demandHandler(clusters))
 	mux.HandleFunc("/api/reset", resetHandler(clusters, *baseline))
 	mux.HandleFunc("/api/scenario", scenarioHandler(clusters))

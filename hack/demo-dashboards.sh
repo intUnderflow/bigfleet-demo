@@ -8,9 +8,10 @@ command -v docker >/dev/null && docker info >/dev/null 2>&1 || { log "docker not
 docker image inspect "$IMG" >/dev/null 2>&1 || { log "pulling $IMG"; docker pull "$IMG" >/dev/null 2>&1 || true; }
 
 : > "$RUN/dashboards"
-port=9101
+port=$DASH_PORT_BASE
 for c in "${CLUSTERS[@]}"; do
   kc="$RUN/$c.kubeconfig"
+  dn="dash-$(kwokname "$c")"   # GLOBAL container name — unique per session
   [ -f "$kc" ] || { port=$((port+1)); continue; }
   # a read-only dashboard ServiceAccount + token (real apiserver supports this)
   KUBECONFIG="$kc" kubectl create serviceaccount dashboard -n kube-system >/dev/null 2>&1 || true
@@ -26,8 +27,8 @@ for c in "${CLUSTERS[@]}"; do
   KUBECONFIG="$kc" kubectl config view --minify --flatten 2>/dev/null \
     | sed -E "s#server: .*#server: $hostsrv#" \
     | sed -E 's#certificate-authority-data:.*#insecure-skip-tls-verify: true#' > "$dkc"
-  docker rm -f "dash-$c" >/dev/null 2>&1 || true
-  docker run -d --name "dash-$c" --restart unless-stopped --tmpfs /tmp:rw,size=64m \
+  docker rm -f "$dn" >/dev/null 2>&1 || true
+  docker run -d --name "$dn" --restart unless-stopped --tmpfs /tmp:rw,size=64m \
     -p "127.0.0.1:$port:9090" -v "$dkc:/kc:ro" "$IMG" \
     --kubeconfig=/kc --insecure-bind-address=0.0.0.0 --insecure-port=9090 \
     --enable-insecure-login --enable-skip-login --disable-settings-authorizer >/dev/null 2>&1 \

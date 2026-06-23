@@ -1,0 +1,27 @@
+name = "bigfleet-demo-coordinator"
+main = "src/index.ts"
+compatibility_date = "2025-07-18"
+
+# Runner base URLs — each a demohost daemon behind an HTTPS tunnel. Edit to your runners.
+# Entries may be strings or { "url": "...", "name": "..." } objects.
+[vars]
+RUNNERS = '["https://r1.bigfleet-demo.lucy.sh"]'
+
+# KV: ip -> session assignment (auto-expires at session end). Create the namespace with:
+#   npx wrangler kv namespace create SESSIONS
+#   npx wrangler kv namespace create SESSIONS --preview
+# then paste the returned ids below.
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "REPLACE_WITH_KV_ID"
+preview_id = "REPLACE_WITH_KV_PREVIEW_ID"
+
+# Bind the worker to the public hostname (after the lucy.sh zone + DNS record exist).
+# Uncomment and set your zone:
+# [[routes]]
+# pattern = "bigfleet-demo-api.lucy.sh/*"
+# zone_name = "lucy.sh"
+
+# DEMOHOST_KEY is a SECRET — never in this file. Set it with:
+#   npx wrangler secret put DEMOHOST_KEY     # paste the contents of ../secrets/demohost.key
+# For `wrangler dev`, put DEMOHOST_KEY (and a localhost RUNNERS override) in worker/.dev.vars

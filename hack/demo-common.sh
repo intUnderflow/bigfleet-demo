@@ -14,16 +14,43 @@ REPO_ROOT="$(cd "$HACK_DIR/.." && pwd)"
 # checkout. Set BIGFLEET_DIR=/path/to/bigfleet to build against a local engine checkout.
 BIGFLEET_DIR="${BIGFLEET_DIR:-}"
 KWOK_DIR="${KWOK_DIR:-/tmp/kwokbin}"          # kwokctl + kwok live here
-RUN="$REPO_ROOT/run"                           # session state (gitignored)
-BIN="$REPO_ROOT/bin"                           # built binaries (gitignored)
+BIN="$REPO_ROOT/bin"                           # built binaries (gitignored, SHARED across sessions)
 KWOK_VERSION="${KWOK_VERSION:-v0.7.0}"
 KWOK_RUNTIME="${KWOK_RUNTIME:-docker}"         # kube-apiserver has no darwin binary -> docker (prod = linux/binary)
 
+# SESSION_ID scopes a whole demo stack so many can run side by side on one host (the
+# demohost daemon sets it per session). Empty = the classic single-session local demo.
+SESSION_ID="${SESSION_ID:-}"
+if [ -n "$SESSION_ID" ]; then
+  RUN="$REPO_ROOT/run/sessions/$SESSION_ID"    # per-session state (gitignored)
+else
+  RUN="$REPO_ROOT/run"                          # single-session state (gitignored)
+fi
+
+# Logical cluster ids — STABLE across sessions (operator --cluster-id, kubeconfig
+# filenames, UI labels). The GLOBAL kwokctl/docker name is derived per-session via
+# kwokname() so concurrent sessions never collide on a cluster or container name.
 CLUSTERS=(cluster-a cluster-b cluster-c)
-SHARD_METRICS="127.0.0.1:18799"
-SHARD_LISTEN="127.0.0.1:17780"
-PROVIDER_LISTEN="127.0.0.1:19090"   # the fakecloud three-cloud CapacityProvider the shard dials
-BACKEND_ADDR="127.0.0.1:8090"       # the demo backend + UI (and the /api/* the hack scripts drive)
+kwokname(){ if [ -n "$SESSION_ID" ]; then echo "${SESSION_ID}-$1"; else echo "$1"; fi; }
+
+# Ports. A demohost session passes PORT_BASE and we carve a small block out of it so
+# sessions don't fight over ports; the classic single-session demo keeps fixed ports.
+# (kwokctl auto-allocates each apiserver's own high port, independent of PORT_BASE.)
+PORT_BASE="${PORT_BASE:-}"
+DASHBOARDS="${DASHBOARDS:-1}"        # per-cluster k8s dashboards (3 docker containers/session); host sets 0 to stay lean
+BACKEND_PORT="${PORT_BASE:-8090}"
+BACKEND_ADDR="127.0.0.1:$BACKEND_PORT"  # demo backend + UI bind (and the /api/* the hack scripts drive)
+if [ -n "$PORT_BASE" ]; then
+  SHARD_LISTEN="127.0.0.1:$((PORT_BASE+1))"
+  SHARD_METRICS="127.0.0.1:$((PORT_BASE+2))"
+  PROVIDER_LISTEN="127.0.0.1:$((PORT_BASE+3))"
+  DASH_PORT_BASE=$((PORT_BASE+5))
+else
+  SHARD_LISTEN="127.0.0.1:17780"
+  SHARD_METRICS="127.0.0.1:18799"
+  PROVIDER_LISTEN="127.0.0.1:19090"  # the fakecloud three-cloud CapacityProvider the shard dials
+  DASH_PORT_BASE=9101
+fi
 
 # Two-tier finite fleet (see scenarios/demo-fleet.yaml):
 #   ONPREM_SIZE = owned bare-metal Idle pool (--seed-machines): always-on, $0 marginal.
@@ -63,6 +90,16 @@ ensure_kwok(){
 
 build_bins(){
   mkdir -p "$BIN"
+  # SKIP_BUILD lets the demohost build the shared binaries ONCE, then spawn many
+  # sessions that reuse them (building per session would be wasteful and racy).
+  if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    local ok=1
+    for b in node-creator fakecloud-provider demo-backend shard operator upc; do
+      [ -x "$BIN/$b" ] || ok=0
+    done
+    if [ "$ok" = "1" ]; then log "SKIP_BUILD=1 — reusing prebuilt binaries in $BIN"; return; fi
+    log "SKIP_BUILD=1 but binaries missing — building anyway"
+  fi
   resolve_bigfleet_dir
   log "building node-creator + fakecloud-provider + demo-backend (demo) + shard + operator + upc (published bigfleet) -> $BIN"
   ( cd "$REPO_ROOT" && go build -o "$BIN/node-creator" ./cmd/node-creator )
@@ -79,11 +116,12 @@ build_bins(){
 # create_cluster <name>: a real kwokctl cluster + BigFleet CRDs + PriorityClasses +
 # the production/batch namespaces. Writes $RUN/<name>.kubeconfig.
 create_cluster(){
-  local c="$1"
-  kwokctl delete cluster --name "$c" >/dev/null 2>&1 || true
-  kwokctl create cluster --name "$c" --runtime "$KWOK_RUNTIME" --quiet-pull \
+  local c="$1"               # logical id (cluster-a/b/c) — stable, used everywhere downstream
+  local kn; kn="$(kwokname "$c")"  # global kwokctl/docker name — unique per session
+  kwokctl delete cluster --name "$kn" >/dev/null 2>&1 || true
+  kwokctl create cluster --name "$kn" --runtime "$KWOK_RUNTIME" --quiet-pull \
     --kube-scheduler-config "$HACK_DIR/scheduler-config.yaml" >/dev/null 2>&1
-  kwokctl --name "$c" get kubeconfig > "$RUN/$c.kubeconfig"
+  kwokctl --name "$kn" get kubeconfig > "$RUN/$c.kubeconfig"
   local kc="$RUN/$c.kubeconfig"
   resolve_bigfleet_dir
   KUBECONFIG="$kc" kubectl apply -f "$BIGFLEET_DIR/api/crd/" >/dev/null
