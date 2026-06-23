@@ -547,7 +547,16 @@ func serveMain(args []string) {
 		http.Redirect(w, r, r.URL.Path+"/", http.StatusTemporaryRedirect)
 	})
 
-	srv := &http.Server{Addr: c.addr, Handler: mux}
+	// Bound header-read + idle time and header size. NO ReadTimeout/WriteTimeout: the
+	// /s/{id} proxy carries the session's long-lived SSE stream, which a WriteTimeout
+	// would sever.
+	srv := &http.Server{
+		Addr:              c.addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16,
+	}
 	go func() {
 		<-ctx.Done()
 		fmt.Println("\ndemohost: shutting down — reaping all sessions")

@@ -15,7 +15,7 @@ func parseServeFlags(args []string) (config, string, bool) {
 	var c config
 	var keyFile string
 	var devNoAuth bool
-	fs.StringVar(&c.addr, "addr", ":8080", "host API listen address")
+	fs.StringVar(&c.addr, "addr", "127.0.0.1:8080", "host API listen address — loopback by default; the cloudflared tunnel reaches it on 127.0.0.1 (avoids LAN exposure)")
 	fs.StringVar(&c.repo, "repo", ".", "path to the bigfleet-demo repo (where hack/demo-*.sh live)")
 	fs.StringVar(&c.advertise, "advertise-host", "localhost", "host part used in returned session URLs")
 	fs.StringVar(&keyFile, "key-file", "secrets/demohost.key", "file holding the coordinator secret key")

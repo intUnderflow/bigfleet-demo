@@ -373,9 +373,9 @@ func main() {
 	mux.HandleFunc("/api/stream", hub.serveSSE)
 	mux.HandleFunc("/api/session", sessionHandler(clock))
 	mux.HandleFunc("/api/heartbeat", heartbeatHandler(clock))
-	mux.HandleFunc("/api/demand", demandHandler(clusters))
-	mux.HandleFunc("/api/reset", resetHandler(clusters, *baseline))
-	mux.HandleFunc("/api/scenario", scenarioHandler(clusters))
+	mux.HandleFunc("/api/demand", limited(demandHandler(clusters)))
+	mux.HandleFunc("/api/reset", limited(resetHandler(clusters, *baseline)))
+	mux.HandleFunc("/api/scenario", limited(scenarioHandler(clusters)))
 	for _, dm := range dashMounts {
 		mux.Handle(dm.prefix+"/", dashHandler(dm.prefix, dm.target, dm.token)) // ServeMux redirects /dash/a -> /dash/a/
 	}
@@ -386,7 +386,18 @@ func main() {
 	mux.Handle("/", http.FileServer(http.Dir(dir)))
 
 	fmt.Printf("demo-backend: http://localhost%s  (ui=%s, clusters=%d)\n", *addr, dir, len(clusters))
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	// Hardening: bound header-read + idle time and header size so an anonymous visitor
+	// (reaching us through the demohost /s/{id} proxy) can't tie up goroutines with slow
+	// or oversized requests. NO ReadTimeout/WriteTimeout — those would kill the long-lived
+	// SSE stream (/api/stream); MaxBytesReader caps request BODIES per-handler instead.
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 16, // 64 KiB
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		die("listen", err)
 	}
 }
@@ -1019,6 +1030,12 @@ func scenarioHandler(clusters []cluster) http.HandlerFunc {
 			Name string `json:"name"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch req.Name { // allowlist — reject anything but the three teaching scenarios
+		case "saturate", "critical", "move":
+		default:
+			http.Error(w, "unknown scenario", http.StatusBadRequest)
+			return
+		}
 		scenMu.Lock()
 		if scenCancel != nil {
 			scenCancel()
@@ -1028,6 +1045,63 @@ func scenarioHandler(clusters []cluster) http.HandlerFunc {
 		scenMu.Unlock()
 		go runScenario(ctx, clusters, req.Name)
 		_, _ = w.Write([]byte(`{"ok":true}`))
+	}
+}
+
+// ---- abuse limits ----
+//
+// One demo-backend serves ONE session, reached by an anonymous visitor through the demohost
+// /s/{id} proxy. These bound what that single visitor can do to their own session's backend:
+// a token-bucket on the write endpoints (demand/scenario/reset) and a hard cap on concurrent
+// SSE streams. All in-process and session-scoped — they don't touch the host.
+
+const maxSSEClients = 64 // concurrent /api/stream connections per session backend
+
+const maxBodyBytes = 4 << 10 // 4 KiB — every /api/* body is a tiny JSON object
+
+// rateLimiter is a minimal token bucket (no deps). Shared across the write endpoints of one
+// backend, so a visitor spamming /api/demand|scenario|reset is throttled to a sane rate.
+type rateLimiter struct {
+	mu     sync.Mutex
+	tokens float64
+	max    float64
+	perSec float64
+	last   time.Time
+}
+
+func newRateLimiter(perSec, burst float64) *rateLimiter {
+	return &rateLimiter{tokens: burst, max: burst, perSec: perSec, last: time.Now()}
+}
+
+func (rl *rateLimiter) allow() bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	rl.tokens += now.Sub(rl.last).Seconds() * rl.perSec
+	if rl.tokens > rl.max {
+		rl.tokens = rl.max
+	}
+	rl.last = now
+	if rl.tokens >= 1 {
+		rl.tokens--
+		return true
+	}
+	return false
+}
+
+// writeLimiter throttles the state-changing endpoints (generous for real UI clicks, hostile
+// to a spam loop): ~5 req/s sustained, burst 10.
+var writeLimiter = newRateLimiter(5, 10)
+
+// limited wraps a write handler with the body-size cap + the rate limit.
+func limited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !writeLimiter.allow() {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		next(w, r)
 	}
 }
 
@@ -1065,6 +1139,11 @@ func (h *hub) serveSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	ch := make(chan []byte, 4)
 	h.mu.Lock()
+	if len(h.clients) >= maxSSEClients { // cap concurrent streams per session backend
+		h.mu.Unlock()
+		http.Error(w, "too many streams", http.StatusServiceUnavailable)
+		return
+	}
 	h.clients[ch] = true
 	last := h.last
 	h.mu.Unlock()
