@@ -1,0 +1,21 @@
+# KubeSchedulerConfiguration — make in-cluster placement BIN-PACK (MostAllocated)
+# instead of the stock default (LeastAllocated, which spreads and left nodes at
+# 2-12 pods with some ~40% full). Consistent with BigFleet's cheap-first/pack story:
+# pods stack onto the fewest nodes, so a partial node fills before a new one is
+# provisioned. Real, stock scheduler — just a scoring-strategy choice.
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+profiles:
+  - schedulerName: default-scheduler
+    pluginConfig:
+      - name: NodeResourcesFit
+        args:
+          apiVersion: kubescheduler.config.k8s.io/v1
+          kind: NodeResourcesFitArgs
+          scoringStrategy:
+            type: MostAllocated
+            resources:
+              - name: cpu
+                weight: 1
+              - name: memory
+                weight: 1

@@ -1,0 +1,30 @@
+# Real Kubernetes PriorityClasses — the stock scheduler uses these for priority
+# ordering and native preemption. batch (best-effort) is preemptible by critical.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: batch }
+value: 100
+globalDefault: false
+description: "Best-effort background work (ETL/ML/analytics) — preemptible."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: production }
+value: 100000
+globalDefault: false
+preemptionPolicy: Never
+description: "Standard production demand — higher priority than batch, but scales OUT (waits for new nodes) rather than EVICTING batch. The everyday demand the visitor drives."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: critical }
+value: 1000000
+globalDefault: false
+description: "Critical production demand — preempts batch under scarcity (the section-8 'priority wins' beat)."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: node-critical }
+value: 1000000000
+globalDefault: false
+description: "System DaemonSet baseline (cni/kube-proxy/node-exporter) — never preempted (max user-defined priority; > critical)."

@@ -1,0 +1,32 @@
+# Go
+/bin/
+*.test
+*.out
+coverage*
+# Workspace file is local convenience only; the root module builds standalone in CI
+go.work
+go.work.sum
+
+# Node / UI
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Local / secrets — never commit cluster creds or demo session state
+.env
+*.local
+kubeconfig*
+*.kubeconfig
+/tmp/
+session-state/
+
+# Local research / design notes — working notes, not part of the shipped repo
+/docs/research/
+
+# M1 session state + built binaries (local)
+/run/
+/bin/
+
+# Working brief — local only, not shipped
+CLAUDE.md

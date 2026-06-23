@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BigFleet — live capacity demo</title>
+<style>
+  :root{
+    /* BigFleet house palette — Starlight hue-224 slate + the site's #2563eb accent */
+    --bg:#17181c;--bg-2:#1b1d24;--panel:#23262f;--panel-2:#2a2d37;
+    --ink:#edeef3;--ink-2:#c1c3c8;--muted:#888c96;--line:#353841;--hair:#20232b;
+    --accent:#2563eb;--accent-high:#93c5fd;--real:#3ddc84;--sim:#f7b955;--bad:#ff6b6b;--idle:#3a4150;
+    --gcp:#4285F4;--aws:#ff9900;--azure:#19c3d6;--prov:#5b6675;
+    --spot:#a78bfa;--onprem:#34d399;--onprem-idle:#1f6e4f;--onprem-idle-ink:#bfe9d4;--avail:#222732;--track:#131419;color-scheme:dark;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;
+    font:15px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+
+  /* top bar — BigFleet wordmark (matches the Starlight site header) + live status + honesty strip */
+  .topbar{flex:0 0 auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    padding:10px 20px;border-bottom:1px solid var(--line);background:var(--bg-2)}
+  .topbar .brand{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-size:16px;
+    letter-spacing:-.01em;white-space:nowrap;text-decoration:none;color:var(--accent-high)}
+  .topbar .brand svg{flex:none;display:block}
+  .topbar .brand:hover{filter:brightness(1.1)}
+  .topbar .tagline{font-size:12.5px;color:var(--muted);padding-left:12px;border-left:1px solid var(--line)}
+  .conn{font-size:11px;color:var(--muted)} .conn.ok{color:var(--real)}
+  .honesty-strip{font-size:11.5px;color:var(--muted);margin-left:auto}
+  .honesty-strip b{color:var(--sim);font-weight:600}
+
+  .layout{flex:1 1 auto;display:grid;grid-template-columns:clamp(380px,38%,520px) 1fr;min-height:0}
+  .doc,.live{overflow-y:auto;min-height:0;padding:22px 26px 60px}
+  .doc{border-right:1px solid var(--line);background:var(--bg-2)}
+
+  /* left guided doc */
+  .doc h1{font-size:21px;margin:0 0 4px}
+  .doc .lede{color:var(--muted);font-size:13.5px;margin:0 0 18px}
+  .doc section{margin:0 0 22px;padding-bottom:20px;border-bottom:1px solid var(--hair)}
+  .doc section:last-child{border-bottom:0}
+  .doc h2{font-size:15px;margin:0 0 7px;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .doc h2 .n{font-size:11px;font-weight:700;color:#fff;background:var(--accent);
+    border-radius:999px;min-width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center}
+  .doc p{margin:0 0 10px;font-size:13.5px;color:var(--ink-2)}
+  .doc .small{font-size:12.5px;color:var(--muted)}
+  .doc b{color:#fff}
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 2px}
+  .action{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 13px;
+    font-size:13px;font-weight:600;cursor:pointer}
+  .action:hover{filter:brightness(1.08)}
+  .action.ghost{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);font-weight:500}
+  .action.ghost:hover{border-color:var(--accent)}
+  .rs{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:4px}
+  .rs .k{color:var(--real);font-weight:600} .rs .s{color:var(--sim);font-weight:600}
+  .rs ul{margin:4px 0 0;padding-left:17px} .rs li{margin:3px 0}
+
+  /* right live pane */
+  .live h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 9px}
+  .live .sec{margin-bottom:22px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 16px}
+
+  /* two-tier supply: one bar per pool (owned on-prem, cloud burst) */
+  .pool{margin-bottom:13px}
+  .pool-hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;margin-bottom:5px}
+  .pool-name{font-weight:600;color:var(--ink)}
+  .pool-sub{color:var(--muted);font-weight:400;font-size:11px;margin-left:6px}
+  .pool-fig{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+  .supply{display:flex;height:28px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--track)}
+  .supply .seg{display:flex;align-items:center;justify-content:center;font-size:11px;color:#06210f;font-weight:700;transition:width .6s ease;min-width:0;white-space:nowrap;overflow:hidden}
+  .supply .seg.owned-idle{background:var(--onprem-idle);color:var(--onprem-idle-ink)}
+  .supply .seg.avail{background:repeating-linear-gradient(45deg,var(--hair),var(--hair) 6px,var(--track) 6px,var(--track) 12px);color:var(--muted)}
+  .cost{font-size:13px;margin:11px 0 2px;font-weight:600;color:var(--ink)}
+  .cost .z{color:var(--real)} .cost .b{color:var(--sim)}
+  .cost .note{display:block;font-weight:400;font-size:11.5px;color:var(--muted);margin-top:2px}
+  .cost .proj{font-weight:400;font-size:11.5px;color:var(--muted)}
+  .rate{font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.5}
+  .rate b{color:var(--ink);font-weight:600}
+  .scoreboard{display:flex;gap:0;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:2px 0;margin-bottom:14px}
+  .scoreboard .sb{flex:1 1 0;min-width:96px;padding:9px 14px;border-right:1px solid var(--line)}
+  .scoreboard .sb:last-child{border-right:0}
+  .scoreboard .sb .k{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  .scoreboard .sb .v{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--ink);margin-top:2px;line-height:1.1}
+  .scoreboard .sb .s{font-size:10.5px;color:var(--muted);margin-top:1px}
+  .scoreboard .sb .v.green{color:var(--onprem)} .scoreboard .sb .v.amber{color:var(--aws)} .scoreboard .sb .v.zero{color:var(--muted)} .scoreboard .sb .v.spot{color:var(--spot)}
+  .scale{font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.5;border-top:1px solid var(--hair);padding-top:9px}
+  .scale b{color:var(--ink-2);font-weight:600}
+  .cap{font-size:12px;color:var(--muted);margin-top:8px}
+  .legend{display:flex;gap:13px;margin-top:9px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+  .dot.hatch{background:repeating-linear-gradient(45deg,var(--hair),var(--hair) 3px,var(--track) 3px,var(--track) 6px)}
+
+  .fleet{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:13px}
+  .cluster h3{margin:0 0 2px;font-size:15px}
+  .cluster .mix{font-size:11.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-top:2px}
+  .cluster .mix .chip{white-space:nowrap}
+  .tiles{display:flex;flex-wrap:wrap;gap:3px;margin:10px 0;min-height:40px;align-content:flex-start}
+  .tile{width:11px;height:11px;border-radius:2px;background:var(--real);transition:background .3s}
+  .tile.prov{background:var(--prov);animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.9}50%{opacity:.32}}
+  .stat{display:flex;gap:12px;font-size:12px;color:var(--muted);margin-bottom:10px}
+  .stat b{color:var(--ink)}
+  .crow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .demand-ctl{display:flex;align-items:center;gap:6px}
+  .demand-ctl .lvl{font-family:var(--mono);min-width:62px;text-align:center;font-size:12px}
+  button.sm{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:5px 9px;font-size:12.5px;cursor:pointer}
+  button.sm:hover{border-color:var(--accent)}
+  .dash-btn{width:100%;margin-top:9px}
+
+  .feed{font-family:var(--mono);font-size:12px;max-height:240px;overflow:auto}
+  .feed div{padding:3px 0;border-bottom:1px solid var(--hair);color:var(--ink-2)}
+  .feed .new{color:var(--real)}
+
+  @media(max-width:900px){
+    body{display:block} .layout{display:block;grid-template-columns:1fr}
+    .doc,.live{overflow:visible} .doc{border-right:0;border-bottom:1px solid var(--line)}
+    .honesty-strip{margin-left:0;flex-basis:100%}
+  }
+
+  /* Follow the browser's light/dark preference (no toggle). Light = Starlight's
+     inverted hue-224 scale; semantic colours darkened to stay legible on white. */
+  @media (prefers-color-scheme: light){
+    :root{
+      color-scheme:light;
+      --bg:#ffffff;--bg-2:#f6f7f9;--panel:#f6f7f9;--panel-2:#eceef2;
+      --ink:#17181c;--ink-2:#3c3f47;--muted:#5e626b;--line:#d6d9df;--hair:#e6e8ec;--track:#eef0f3;
+      --accent:#2563eb;--accent-high:#1e3a8a;
+      --real:#15803d;--sim:#b45309;--bad:#dc2626;
+      --onprem:#059669;--onprem-idle:#6ee7b7;--onprem-idle-ink:#064e3b;
+      --aws:#c2680a;--spot:#7c3aed;--gcp:#1a73e8;--prov:#94a3b8;--avail:#e9ecf1;
+    }
+    body{-webkit-font-smoothing:auto}
+  }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <a class="brand" href="https://bigfleet.lucy.sh">
+      <svg viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <rect x="6" y="20" width="14" height="14" rx="2" fill="#2563eb"/>
+        <rect x="25" y="14" width="14" height="14" rx="2" fill="#3b82f6"/>
+        <rect x="44" y="20" width="14" height="14" rx="2" fill="#60a5fa"/>
+        <rect x="6" y="40" width="14" height="14" rx="2" fill="#1d4ed8"/>
+        <rect x="25" y="34" width="14" height="14" rx="2" fill="#2563eb"/>
+        <rect x="44" y="40" width="14" height="14" rx="2" fill="#3b82f6"/>
+      </svg>
+      <span>BigFleet</span>
+    </a>
+    <span class="tagline">live capacity demo</span>
+    <span id="conn" class="conn">connecting…</span>
+    <span class="honesty-strip">Real BigFleet + real Kubernetes scheduling · <b>simulated</b> cloud — kwok nodes, illustrative $ prices, simulated transfer speed</span>
+  </div>
+
+  <div class="layout">
+    <!-- LEFT: the guided tutorial -->
+    <aside class="doc">
+      <h1>Watch infrastructure move</h1>
+      <p class="lede">A live, interactive demo of <b>BigFleet</b> — a fleet-level infrastructure autoscaler. Read down the page and press the buttons; the fleet on the right reacts in real time.</p>
+
+      <section>
+        <h2><span class="n">1</span>What BigFleet is</h2>
+        <p>Most autoscalers add or remove <b>pods</b>, or grow a single cluster. BigFleet works a level up: it manages one <b>finite pool of compute capacity shared across many clusters</b> and moves that capacity to wherever it&rsquo;s needed — provisioning nodes where high-priority demand lands, reclaiming idle nodes elsewhere, and <b>preferring cheap capacity over expensive</b>.</p>
+        <p>It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own scheduler does that. This demo runs BigFleet&rsquo;s real engine against a simulated cloud.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">2</span>Your fleet</h2>
+        <p>On the right are three clusters — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b>. Each is a <b>real Kubernetes apiserver</b>, pre-loaded with baseline workloads already running on nodes BigFleet provisioned for them.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">3</span>Three kinds of capacity: committed, on-demand, spot</h2>
+        <p>BigFleet sorts capacity by <b>cost</b> — specifically by <code>effective_cost = price + interruption_probability × penalty</code>. What matters isn&rsquo;t <i>where</i> a machine lives but what it costs to put a given workload on it. The fleet draws on <b>three tiers</b>, shared across all three clusters:</p>
+        <p>&bull; <b style="color:var(--onprem)">Committed</b> — on-prem bare metal you own <b>or reserved cloud</b> (reserved instances / savings plans). Already paid for, so putting work on it costs <b>~$0 at the margin</b>. BigFleet fills this <b>first</b>.</p>
+        <p>&bull; <b style="color:var(--gcp)">On-demand cloud</b> (GCP / AWS) — elastic, pay-per-use, <b>stable</b>. You pay only while a node runs; the rest is headroom that costs nothing until provisioned.</p>
+        <p>&bull; <b style="color:var(--spot)">Spot</b> — the same cloud SKUs, much cheaper, but <b>interruptible</b>. For <b>interruption-tolerant</b> demand BigFleet <b>provisions cheap spot</b> (lowest effective cost); for <b>interruption-sensitive</b> demand it provisions stable on-demand instead — because spot&rsquo;s interruption term outweighs the saving for that work. That capacity trade-off is the real engine math, not a script. (Which <i>pod</i> lands on which node is then the stock kube-scheduler&rsquo;s bin-packing — a separate layer.)</p>
+        <p class="small">Each tier is <b>declared by a real <code>CapacityProvider</code></b>: three out-of-tree providers (on-prem bare-metal, AWS, GCP) that implement the genuine <code>providerkit</code> six-RPC contract and <b>pass the BigFleet conformance suite</b> (<code>core,cloud,spot</code>) — only the substrate underneath is simulated (kwok). Committed is ~28 on-prem <code>bare-metal-8vcpu</code> + ~20 AWS reserved <code>m6i.2xlarge</code> ($0-marginal); on-demand &amp; spot share the burst SKUs <code>m5.2xlarge</code> / <code>n2-standard-8</code>, differing only in price + interruption. At rest you&rsquo;re entirely on committed capacity at <b>$0/hr</b>. This is the whole finite fleet — it can&rsquo;t grow past its ceiling.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">4</span>Move demand → committed fills, then cloud bursts</h2>
+        <p>Add a burst of <b>production demand</b> to cluster-A. The new pods <b>request capacity</b> the cluster doesn&rsquo;t have, so they go <b>pending</b>; BigFleet packs their requests onto fresh nodes — roughly <b>one node per step of demand</b> — topping out the already-paid-for <b>committed</b> pool first, then <b>bursting onto on-demand cloud</b>. Watch the committed bar fill, nodes take a few moments to provision, and <b>on-demand cloud spend tick up from $0</b>.</p>
+        <div class="actions"><button class="action" onclick="setDemand('cluster-a',20)">▶ Add demand to cluster-A</button></div>
+        <p class="small">The <b>decision</b> — committed-before-on-demand — is BigFleet&rsquo;s real Phase-1 cheapest-first logic; each node <b>bin-packs several pods</b> (open a dashboard to see). This demand scales OUT (new nodes), it doesn&rsquo;t evict anything — <b>priority &amp; preemption come later</b> (§8). The <b>provisioning time</b> is a simulated dwell.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">5</span>Drop demand → cloud is shed first</h2>
+        <p>Now remove that demand. BigFleet <b>reclaims</b> the freed nodes — and it sheds the <b>billed on-demand cloud</b> nodes first (cloud spend falls back toward $0), keeping the already-paid-for committed capacity warm in the shared pool.</p>
+        <div class="actions"><button class="action" onclick="setDemand('cluster-a',0)">▶ Drop cluster-A&rsquo;s demand</button></div>
+      </section>
+
+      <section>
+        <h2><span class="n">6</span>Capacity flows between clusters</h2>
+        <p>Capacity follows demand across the fleet. Spike a <b>different</b> cluster and watch the freed capacity flow there instead.</p>
+        <div class="actions">
+          <button class="action" onclick="scenario('move')">▶ Move capacity from cluster-A to cluster-B</button>
+          <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="n">7</span>Saturate the finite fleet</h2>
+        <p>A real platform doesn&rsquo;t have infinite capacity — and neither does this one. Committed capacity is fixed, and the on-demand cloud quota has a ceiling too. Push demand onto <b>all three clusters at once</b>: the committed pool fills, the on-demand cloud pool fills behind it, and cloud spend climbs to its peak — until nearly every machine is in use.</p>
+        <div class="actions"><button class="action" onclick="scenario('saturate')">▶ Saturate the fleet (load all 3 clusters)</button></div>
+        <p class="small">Watch the committed bar max out, the cloud bar fill, and the <b>cost</b> rise — this is the condition where a <i>fleet-level</i> autoscaler earns its keep.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">8</span>Critical demand into a full fleet → preemption</h2>
+        <p>This is the moment a finite fleet matters. The fleet is full, but a burst of <b>critical production demand</b> (PriorityClass <code>critical</code>) lands on cluster-A. With no capacity left to provision, <b>priority decides</b>: the real Kubernetes scheduler places the critical pods first, and BigFleet reallocates capacity toward them — so the lower-priority <b>batch</b> work (PriorityClass <code>batch</code>) is what&rsquo;s left waiting. The fleet serves what matters most.</p>
+        <div class="actions">
+          <button class="action" onclick="scenario('critical')">▶ Send critical demand into the full fleet</button>
+          <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
+        </div>
+        <p class="small">Watch the fleet fill to its cap, then the real Kubernetes scheduler <b>preempt</b> running <b>batch</b> pods (PriorityClass <code>batch</code>) to place the <b>critical</b> demand — native preemption, real <code>Preempted</code> events. Both the scheduler&rsquo;s priority decision and BigFleet&rsquo;s capacity reallocation are real; only the provisioning time is simulated. BigFleet doesn&rsquo;t invent capacity — it allocates a finite fleet by priority.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">9</span>Prove the clusters are real</h2>
+        <p>Each cluster is a genuine Kubernetes cluster — a real apiserver, the stock <b>kube-scheduler</b>, and real controllers. Open its <b>official Kubernetes dashboard</b> (opens in a new tab) and you&rsquo;ll see the real nodes BigFleet provisioned — committed on-prem <code>bm-dc1-…</code> boxes alongside cloud <code>gke-…</code> / <code>ip-10-…</code> instances tagged <code>bigfleet.demo/billing: on-demand</code> or <code>spot</code>, with their zones and regions. The nodes are <b>kwok-simulated</b> (tagged <code>bigfleet.demo/simulated</code>, <code>kwok://</code> providerID) — only the cloud is fake, never the control plane.</p>
+        <p class="small">And the capacity itself flows through <b>real providers</b>: the shard provisions every node by calling three out-of-tree <code>CapacityProvider</code> backends (on-prem / AWS / GCP) over the genuine six-RPC <code>providerkit</code> contract — the same contract a real cloud provider implements, <b>conformance-certified</b> (<code>core,cloud,spot</code>). The spot-vs-on-demand tier you see on each node is BigFleet&rsquo;s real effective-cost decision read back from what the provider declared, not a label the demo painted on.</p>
+        <div class="actions">
+          <button class="action ghost" onclick="openDash('cluster-a')">⎈ Open cluster-A dashboard</button>
+          <button class="action ghost" onclick="openDash('cluster-b')">⎈ cluster-B</button>
+          <button class="action ghost" onclick="openDash('cluster-c')">⎈ cluster-C</button>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="n">10</span>What&rsquo;s real, what&rsquo;s simulated</h2>
+        <div class="rs">
+          <div><span class="k">● Real</span>
+            <ul><li>BigFleet&rsquo;s engine and its Phase 1/2/3 decisions — it sorts candidate capacity by <b>effective cost</b> (<code>price + interruption×penalty</code>), so it really does fill the $0-marginal committed tier first, route interruption-tolerant work to cheap <b>spot</b> and sensitive work to stable on-demand, and reclaim under pressure</li><li>The <b>three CapacityProviders</b> (on-prem / AWS / GCP) — real <code>providerkit</code> six-RPC backends that pass the BigFleet <b>conformance suite</b>; the four capacity types + prices + interruption probabilities are provider-<i>declared</i></li><li>The <b>real upstream Kubernetes scheduler</b> per cluster — native priority ordering, <b>preemption</b> &amp; bin-packing (MostAllocated), nothing hand-rolled</li><li>A real Kubernetes apiserver, scheduler &amp; controllers per cluster</li></ul></div>
+          <div><span class="s">● Simulated</span>
+            <ul><li>The clouds themselves — <b>on-prem / GCP / AWS are labels</b> on kwok-simulated nodes, not real instances (the providers mint kwok fakes, not VMs)</li><li>The <b>$ prices and interruption probabilities</b> (committed $0 marginal, on-demand ~$0.38, spot ~$0.11 / interruption ~30%) — illustrative author-chosen constants, <b>not cloud quotes</b>; the engine really reasons about them, but no <i>measured</i> saving is claimed</li><li><b>Provisioning &amp; drain time</b> — the move is real; the ~15-40s a node takes to come up (and the drain on reclaim) is a configured dwell</li><li><b>Node internals</b> — pod requests/limits, the kube/system reserve (Allocatable &lt; Capacity) and the cni/kube-proxy/node-exporter DaemonSet baseline are illustrative; kwok runs pods at their request, so there are no real CPU/memory <i>usage</i> metrics</li></ul></div>
+        </div>
+        <p class="small" style="margin-top:12px"><b>Industry context</b> — third-party, <i>not</i> measured here and <i>not</i> a BigFleet result: independent analysis (Datadog, <i>State of Cloud Costs</i>) finds enterprise Kubernetes fleets average <b>~18% CPU utilisation</b>, <b>2&ndash;5&times; over-provisioning</b>, and an estimated <b>$50k&ndash;$500k per cluster per year</b> of wasted spend. This demo shows the engine <b>reasoning about</b> that kind of trapped capacity at a deliberately small scale — it measures and recovers nothing.</p>
+      </section>
+    </aside>
+
+    <!-- RIGHT: the live fleet -->
+    <main class="live">
+      <div class="scoreboard" id="scoreboard"></div>
+      <div class="sec">
+        <h2>Shared supply — committed · on-demand · spot</h2>
+        <div class="panel">
+          <div class="pool">
+            <div class="pool-hd">
+              <span class="pool-name"><span class="dot" style="background:var(--onprem)"></span>Committed<span class="pool-sub">owned on-prem or reserved cloud · already paid · $0 to add work</span></span>
+              <span class="pool-fig" id="fig-onprem"></span>
+            </div>
+            <div class="supply" id="supply-onprem"></div>
+          </div>
+          <div class="pool">
+            <div class="pool-hd">
+              <span class="pool-name"><span class="dot" style="background:var(--gcp)"></span>Cloud<span class="pool-sub">GCP / AWS · on-demand + <b style="color:var(--spot)">spot</b> · pay-per-use · $0 until provisioned</span></span>
+              <span class="pool-fig" id="fig-cloud"></span>
+            </div>
+            <div class="supply" id="supply-cloud"></div>
+          </div>
+          <div class="cost" id="cost"></div>
+          <div class="rate" id="rate"></div>
+          <div class="scale">A deliberately small <b>120-node teaching slice</b>. Real production fleets run hundreds to tens of thousands of nodes across many clusters — BigFleet&rsquo;s per-cluster cost-first logic is <b>identical at any scale</b>; only the pool of trapped capacity it reasons over grows.</div>
+          <div class="legend" id="legend"></div>
+        </div>
+      </div>
+      <div class="sec">
+        <h2>Clusters</h2>
+        <div class="fleet" id="fleet"></div>
+      </div>
+      <div class="sec">
+        <h2>Decision feed</h2>
+        <div class="panel feed" id="feed"></div>
+      </div>
+    </main>
+  </div>
+
+<script>
+const CLOUD_COLORS={'On-prem':'var(--onprem)',GCP:'var(--gcp)',AWS:'var(--aws)',Azure:'var(--azure)'};
+const CLOUD_PROVIDERS=['GCP','AWS'];          // the elastic (billed) providers
+let last={}, lastFeedLen=0, clouds=['On-prem','GCP','AWS'];
+let legendDrawn=false;
+const sig={feed:''};
+
+const es=new EventSource('/api/stream');
+es.onopen=()=>{const c=document.getElementById('conn');c.textContent='● live';c.className='conn ok';};
+es.onerror=()=>{const c=document.getElementById('conn');c.textContent='● reconnecting';c.className='conn';};
+es.onmessage=e=>render(JSON.parse(e.data));
+
+function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); }
+
+// renderScore: the at-a-glance fleet scoreboard — total nodes vs the finite 120-cap,
+// the committed/on-demand split, free headroom, and the honest on-demand $/hr. All
+// derived from the same FleetState; no new claims.
+function renderScore(st){
+  const c=st.capacity||{}, cap=st.fleetSize||120;
+  const live=(c.onpremInUse||0)+(c.cloudInUse||0);
+  const headroom=(c.onpremIdle||0)+(c.cloudAvailable||0);
+  const cost=c.costPerHour||0;
+  const pending=(st.clusters||[]).reduce((a,x)=>a+(x.podsPending||0),0);
+  const cells=[
+    {k:'Fleet in use', v:`${live} / ${cap}`, s:'nodes carrying work', cls:''},
+    {k:'Committed ($0)', v:`${c.onpremInUse||0} / ${c.onpremTotal||0}`, s:'owned + reserved', cls:'green'},
+    {k:'On-demand', v:`${c.onDemandInUse||0}`, s:'metered cloud', cls:(c.onDemandInUse>0?'amber':'zero')},
+    {k:'Spot', v:`${c.spotInUse||0}`, s:'cheap · interruptible', cls:(c.spotInUse>0?'spot':'zero')},
+    {k:'Cloud $/hr', v:`$${cost.toFixed(2)}`, s:cost>0?'illustrative':'$0 at the margin', cls:(cost>0?'amber':'zero')},
+    {k:'Pending', v:`${pending}`, s:pending>0?'waiting on capacity':'all placed', cls:(pending>0?'amber':'zero')},
+  ];
+  document.getElementById('scoreboard').innerHTML=cells.map(x=>
+    `<div class="sb"><div class="k">${x.k}</div><div class="v ${x.cls}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
+}
+
+// drawBar: persistent segments (created once) whose widths animate — no innerHTML
+// churn, so the bar slides smoothly instead of flashing. Segments are kept in the
+// passed order via insertBefore, but only MOVED when actually out of position — so a
+// new SKU slots in correctly while steady-state ticks don't reset the width transition.
+function drawBar(elId,total,segs){
+  const el=document.getElementById(elId);
+  segs.forEach((s,idx)=>{
+    let d=el.querySelector('[data-seg="'+s.key+'"]');
+    if(!d){ d=document.createElement('div'); d.className='seg'+(s.cls?' '+s.cls:''); d.dataset.seg=s.key;
+            if(s.color) d.style.background=s.color; }
+    if(el.children[idx]!==d) el.insertBefore(d, el.children[idx]||null);
+    d.style.width=(100*s.n/(total||1))+'%';
+    d.textContent=s.n?(s.label+s.n):'';
+  });
+}
+
+// map a SKU/instance-type to its provider (mirrors the backend) — for grouping + colour.
+function providerOfType(t){
+  if(t.indexOf('bare-metal')===0||t.indexOf('onprem')===0) return 'On-prem';
+  if(t.indexOf('n2-')===0||t.indexOf('e2-')===0||t.indexOf('n1-')===0) return 'GCP';
+  return 'AWS';
+}
+const PROV_ORDER={'On-prem':0,'GCP':1,'AWS':2};
+// build colour-grouped bar segments from a {SKU:count} map, sorted by provider then SKU,
+// labelled with the real SKU and coloured by its provider.
+function typeSegs(byType, prefix){
+  return Object.keys(byType||{}).sort((a,b)=>
+    (PROV_ORDER[providerOfType(a)]-PROV_ORDER[providerOfType(b)]) || a.localeCompare(b)
+  ).map(t=>({key:prefix+t, n:byType[t]||0, color:CLOUD_COLORS[providerOfType(t)], label:providerOfType(t)+' '+t+' '}));
+}
+
+// Two-tier supply: committed bar (per-SKU in use / idle, all $0) and on-demand cloud bar
+// (per-SKU in use / available headroom), plus the honest on-demand $/hr.
+function renderSupply(st){
+  const c=st.capacity||{};
+  drawBar('supply-onprem', c.onpremTotal||1,
+    typeSegs(c.committedByType, 'cm-').concat([{key:'own-idle', n:c.onpremIdle||0, cls:'owned-idle', label:'idle '}]));
+  document.getElementById('fig-onprem').textContent=`${c.onpremInUse||0} / ${c.onpremTotal||0} in use (on-prem + AWS reserved) · $0 to add work`;
+
+  // cloud bar: on-demand SKUs (per provider) + SPOT (its own colour — same SKU,
+  // cheaper, interruptible; BigFleet routes here for interruption-tolerant work) + headroom.
+  const segs=typeSegs(c.cloudByType, 'cl-');
+  const spotSegs=Object.keys(c.spotByType||{}).sort().map(t=>(
+    {key:'sp-'+t, n:c.spotByType[t]||0, color:'var(--spot)', label:'SPOT '+t+' '}));
+  segs.push(...spotSegs);
+  segs.push({key:'cl-avail', n:c.cloudAvailable||0, cls:'avail', label:'available '});
+  drawBar('supply-cloud', c.cloudTotal||1, segs);
+  const cost=c.costPerHour||0;
+  const spot=c.spotInUse||0, od=c.onDemandInUse||0;
+  document.getElementById('fig-cloud').textContent=
+    `${c.cloudInUse||0} / ${c.cloudTotal||0} provisioned · ${od} on-demand + ${spot} spot · $${cost.toFixed(2)}/hr`;
+
+  const el=document.getElementById('cost');
+  if(cost>0){
+    const mo=Math.round(cost*730).toLocaleString();
+    const split = spot>0
+      ? ` Of the cloud nodes, <b style="color:var(--spot)">${spot} are spot</b> (~$${(c.spotHourly||0).toFixed(2)}/node&middot;hr, interruptible) and ${od} on-demand (~$${(c.nodeHourly||0).toFixed(2)}) — BigFleet put interruption-tolerant work on cheaper spot.`
+      : '';
+    el.innerHTML=`Metered cloud spend right now: <b class="b">$${cost.toFixed(2)}/hr</b> `+
+      `<span class="proj">(~$${mo}/mo if held at this node count for 730 hrs — illustrative)</span> &mdash; committed capacity adds <span class="z">$0 at the margin</span> (already paid for).`+
+      `<span class="note">${split}</span>`;
+  } else {
+    el.innerHTML=`On-demand (metered) spend right now: <b class="z">$0.00/hr</b> &mdash; all work is on committed capacity, with no on-demand cloud running.`+
+      `<span class="note">Committed capacity is already paid for &mdash; owned on-prem plus AWS reserved instances you pay for whether or not they run &mdash; so it&rsquo;s <b>$0 at the margin</b>, not $0 in total. On-demand cloud is headroom you don&rsquo;t pay for until BigFleet provisions it.</span>`;
+  }
+  // Always-on per-node RATE: the scale-invariant number (an enterprise reads the unit
+  // price, not the tiny absolute total). Illustrative constant — deliberately NOT framed
+  // as a market quote or as "multiply by your fleet to see your stakes".
+  document.getElementById('rate').innerHTML=
+    `On-demand cloud priced at <b>$${(c.nodeHourly||0).toFixed(2)}/node&middot;hr</b> &mdash; illustrative author-chosen constant for an 8 vCPU / 32 GiB node, not a live cloud quote.`;
+
+  if(!legendDrawn){ legendDrawn=true;
+    document.getElementById('legend').innerHTML=
+      `<span><span class="dot" style="background:var(--onprem)"></span>committed &middot; on-prem owned</span>`+
+      `<span><span class="dot" style="background:var(--aws)"></span>committed &middot; AWS reserved</span>`+
+      `<span><span class="dot" style="background:var(--onprem-idle)"></span>committed idle ($0 to add work)</span>`+
+      `<span><span class="dot" style="background:var(--gcp)"></span>on-demand GCP</span>`+
+      `<span><span class="dot" style="background:var(--aws)"></span>on-demand AWS</span>`+
+      `<span><span class="dot" style="background:var(--spot)"></span>spot (cheaper · interruptible)</span>`+
+      `<span><span class="dot hatch"></span>cloud available ($0)</span>`;
+  }
+}
+
+// Fleet map: one panel per cluster, rebuilt ONLY when that cluster's data changes
+// (per-panel signature) so a stable cluster's provisioning pulse runs smoothly.
+function renderFleet(st){
+  const host=document.getElementById('fleet');
+  (st.clusters||[]).forEach(c=>{
+    let panel=document.getElementById('cl-'+c.name);
+    if(!panel){ panel=document.createElement('div'); panel.className='panel cluster'; panel.id='cl-'+c.name; host.appendChild(panel); }
+    const s=JSON.stringify([c.nodesByCloud,c.podsPending,c.podsRunning,c.nodes,c.demand,c.critical,c.dashboard]);
+    if(panel.dataset.sig===s) return; panel.dataset.sig=s;
+
+    let tiles='';
+    clouds.forEach(cl=>{ const n=(c.nodesByCloud||{})[cl]||0;
+      tiles+=Array.from({length:n}).map(()=>`<div class="tile" style="background:${CLOUD_COLORS[cl]}"></div>`).join(''); });
+    tiles+=Array.from({length:Math.min(Math.max(0,c.podsPending||0),10)}).map(()=>`<div class="tile prov" title="pods pending — BigFleet is provisioning capacity"></div>`).join('');
+
+    const mix=clouds.filter(cl=>(c.nodesByCloud||{})[cl]).map(cl=>
+      `<span class="chip"><span class="dot" style="background:${CLOUD_COLORS[cl]}"></span>${cl} ${c.nodesByCloud[cl]}</span>`).join('')
+      || '<span class="chip" style="color:var(--muted)">no capacity yet</span>';
+    const dash=c.dashboard?`<button class="sm dash-btn" onclick="window.open('${c.dashboard}','_blank')">⎈ Open Kubernetes dashboard</button>`:'';
+
+    panel.innerHTML=
+      `<h3>${c.name}</h3><div class="mix">${mix}</div>
+       <div class="tiles">${tiles}</div>
+       <div class="stat"><span>nodes <b>${c.nodes}</b></span><span>running <b>${c.podsRunning}</b></span><span>pending <b>${c.podsPending}</b></span>${c.critical>0?`<span>critical <b style="color:var(--bad)">${c.critical}</b></span>`:''}</div>
+       <div class="crow"><div class="demand-ctl" id="demand-${c.name}">
+         <button class="sm" onclick="bump('${c.name}',-5)">−</button>
+         <span class="lvl">demand ${c.demand}</span>
+         <button class="sm" onclick="bump('${c.name}',5)">+</button></div></div>
+       ${dash}`;
+  });
+}
+
+function renderFeed(st){
+  const f=st.feed||[]; const s=JSON.stringify(f); if(s===sig.feed) return; sig.feed=s;
+  const el=document.getElementById('feed');
+  el.innerHTML=f.map((line,idx)=>`<div class="${idx<(f.length-lastFeedLen)?'new':''}">${line}</div>`).join('')||'<div style="color:var(--muted)">no decisions yet — press a button on the left</div>';
+  lastFeedLen=f.length;
+}
+
+function bump(ws,d){ const c=(last.clusters||[]).find(x=>x.name===ws); const lvl=Math.max(0,Math.min(40,(c?c.demand:0)+d)); setDemand(ws,lvl); }
+// tier defaults to 'demand' (standard production — preemptionPolicy:Never, provisions
+// rather than evicting batch). Section 8 passes 'critical' (preempts batch).
+function setDemand(ws,level,tier){ post('/api/demand',{workspace:ws,level:level,tier:tier||'demand'}); }
+function setAll(level){ (last.clusters||[]).forEach(c=>setDemand(c.name,level)); }
+// Saturate the whole fleet with CRITICAL demand, in one click, so the priority story
+// fires reliably: clear standard demand, then drive the critical tier (PriorityClass
+// critical, 1e6) on all three (a=40, B/C=30). The fleet is fully contended, so the
+// scheduler preempts low-priority batch (100) to serve critical — batch is left pending.
+function criticalSurge(){ ['cluster-a','cluster-b','cluster-c'].forEach(w => { setDemand(w,0,'demand'); setDemand(w, w==='cluster-a'?40:30, 'critical'); }); }
+// staged teaching scenarios: the backend drives the fleet to the required precondition
+// (full / contended) then injects the beat + narrates it, so §6/§7/§8 land every time.
+function scenario(name){ post('/api/scenario',{name:name}); }
+function resetDemo(){ post('/api/reset',{}); }
+function openDash(ws){ const c=(last.clusters||[]).find(x=>x.name===ws); if(c&&c.dashboard){ window.open(c.dashboard,'_blank'); } else { alert('dashboard for '+ws+' is still starting — try again in a moment'); } }
+function post(u,b){ fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); }
+</script>
+</body>
+</html>
