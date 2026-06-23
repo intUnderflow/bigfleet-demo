@@ -136,7 +136,7 @@ port, exposes every session — no raw per-session ports on the internet. (`/v1/
 key-gated; `/s/*` is the visitor surface.)
 
 The public front door is the **Cloudflare Worker coordinator** (`worker/`, served at
-`bigfleet-demo-api.lucy.sh`): it holds the key, maps each visitor IP → a session on a runner with
+`bigfleet-demo.lucy.sh`): it holds the key, maps each visitor IP → a session on a runner with
 capacity, proxies them in, and re-assigns when a session ends. See
 [`worker/README.md`](../worker/README.md) for the architecture and deploy steps.
 

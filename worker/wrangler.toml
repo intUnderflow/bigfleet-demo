@@ -21,7 +21,7 @@ preview_id = "1bc60c4b633d4655ae3450ca8ac5aafb"
 # Bind the worker to the public hostname (after the lucy.sh zone + DNS record exist).
 # Uncomment and set your zone:
 # [[routes]]
-# pattern = "bigfleet-demo-api.lucy.sh/*"
+# pattern = "bigfleet-demo.lucy.sh/*"
 # zone_name = "lucy.sh"
 
 # DEMOHOST_KEY is a SECRET — never in this file. Set it with:

@@ -1,5 +1,5 @@
 /**
- * BigFleet demo coordinator — the Cloudflare Worker at bigfleet-demo-api.lucy.sh.
+ * BigFleet demo coordinator — the Cloudflare Worker at bigfleet-demo.lucy.sh.
  *
  * It is the public front door and the only thing that creates sessions. It knows the
  * runners (demohost daemons) by their internet addresses and current capacity, assigns
@@ -10,7 +10,7 @@
  *
  * Config:
  *   RUNNERS       (var)    JSON array of runner base URLs, e.g.
- *                          ["https://r1.bigfleet-demo.lucy.sh","https://r2.bigfleet-demo.lucy.sh"]
+ *                          ["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]
  *                          (entries may also be objects {"url":"...","name":"..."}).
  *   DEMOHOST_KEY  (secret) the coordinator key — sent as X-Demo-Key to each runner's /v1/*.
  *   SESSIONS      (KV)     ip -> {runner,id,expiresAt}; auto-expires at session end.

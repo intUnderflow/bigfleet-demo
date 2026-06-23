@@ -57,7 +57,7 @@ export DEMOHOST_KEY=$(cat secrets/demohost.key)   # generated locally; mirrored 
 ./bin/demohost capacity      # machine RAM / budget / measured usage / headroom
 ```
 
-The public front door is a **Cloudflare Worker** (`worker/`, at `bigfleet-demo-api.lucy.sh`) that
+The public front door is a **Cloudflare Worker** (`worker/`, at `bigfleet-demo.lucy.sh`) that
 assigns each visitor IP to a session on a runner with capacity and re-assigns when a session
 ends. Full operator guide: **[docs/operating-the-host.md](docs/operating-the-host.md)**;
 coordinator: **[worker/README.md](worker/README.md)**.

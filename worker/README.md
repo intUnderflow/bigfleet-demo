@@ -1,6 +1,6 @@
 # bigfleet-demo coordinator (Cloudflare Worker)
 
-The public front door at **bigfleet-demo-api.lucy.sh**. It knows the **runners** (the
+The public front door at **bigfleet-demo.lucy.sh**. It knows the **runners** (the
 [`demohost`](../docs/operating-the-host.md) daemons) by their internet addresses and live
 capacity, assigns each visitor — keyed by **IP** — to a session on a runner with headroom,
 and reverse-proxies their traffic to that session. When a session ends (the 1-hour cap, or
@@ -8,7 +8,7 @@ and reverse-proxies their traffic to that session. When a session ends (the 1-ho
 gets a **fresh** session on a runner that still has room.
 
 ```
- visitor ──▶ bigfleet-demo-api.lucy.sh (this Worker)
+ visitor ──▶ bigfleet-demo.lucy.sh (this Worker)
               │  1. IP in KV?  ── yes ─▶ proxy ──▶ https://runnerN/s/<id>/…
               │                 ── no  ─▶ interstitial → POST /_coordinator/assign
               │                                            │ pick runner with most headroom
@@ -20,7 +20,7 @@ gets a **fresh** session on a runner that still has room.
 - **State:** Cloudflare **KV** — `ip → {runner,id,expiresAt}`, auto-expiring at session end.
 - **Capacity:** the runner is the source of truth. The Worker reads `GET /v1/capacity` to
   rank runners, and if a `POST /v1/sessions` races to `503` it falls through to the next.
-- **Single origin:** visitors stay on `bigfleet-demo-api.lucy.sh`; the Worker proxies (SSE and
+- **Single origin:** visitors stay on `bigfleet-demo.lucy.sh`; the Worker proxies (SSE and
   all), so the URL and TLS are preserved and raw runner ports are never exposed.
 
 ## Deploy
@@ -31,7 +31,7 @@ over HTTPS with a named hostname (one tunnel per runner):
 ```sh
 # on the runner
 ./bin/demohost serve --addr :8080 --demo-memory-mb 16384 --session-memory-mb 2048
-cloudflared tunnel --hostname r1.bigfleet-demo.lucy.sh --url http://localhost:8080
+cloudflared tunnel --hostname r1-bigfleet-demo.lucy.sh --url http://localhost:8080
 ```
 
 `demohost`'s `/v1/*` stays key-gated (the public gets 401); `/s/<id>/*` is the visitor
@@ -51,7 +51,7 @@ npx wrangler kv namespace create SESSIONS --preview
 
 ```toml
 [vars]
-RUNNERS = '["https://r1.bigfleet-demo.lucy.sh","https://r2.bigfleet-demo.lucy.sh"]'
+RUNNERS = '["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]'
 ```
 
 **3. The coordinator key** (same key the runners use, from `../secrets/demohost.key`):
