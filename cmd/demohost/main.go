@@ -594,7 +594,8 @@ type capacityView struct {
 	MachineTotalMB   int     `json:"machineTotalMB"`
 	DemoBudgetMB     int     `json:"demoBudgetMB"`
 	PerSessionMB     int     `json:"perSessionMB"`
-	RunningSessions  int     `json:"runningSessions"`
+	RunningSessions  int     `json:"runningSessions"`  // all non-reaping sessions incl. the warm pool (admission accounting)
+	VisitorSessions  int     `json:"visitorSessions"`  // sessions actually handed to a visitor (true "busy")
 	MaxSessions      int     `json:"maxSessions"`
 	ReservedMB       int     `json:"reservedMB"`
 	MeasuredActualMB int     `json:"measuredActualMB"`
@@ -608,6 +609,12 @@ func (h *host) capacityView() capacityView {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	n := h.activeCountLocked()
+	visitors := 0 // sessions actually serving a visitor (assignedAt set) — the true "busy"
+	for _, s := range h.sessions {
+		if !s.assignedAt.IsZero() && s.State != "reaping" {
+			visitors++
+		}
+	}
 	reserved := n * h.cfg.sessionMB
 	// headroom = how many more sessions fit under BOTH the reservation budget and (if we
 	// have a measurement) the measured-actual budget, and under maxSessions.
@@ -640,7 +647,7 @@ func (h *host) capacityView() capacityView {
 	}
 	return capacityView{
 		MachineTotalMB: h.machineMB, DemoBudgetMB: h.cfg.demoBudgetMB, PerSessionMB: h.cfg.sessionMB,
-		RunningSessions: n, MaxSessions: h.cfg.maxSessions, ReservedMB: reserved,
+		RunningSessions: n, VisitorSessions: visitors, MaxSessions: h.cfg.maxSessions, ReservedMB: reserved,
 		MeasuredActualMB: h.memActualMB, MeasuredAgeSec: age, WarmReady: warmReady, HeadroomSessions: headroom,
 		BudgetUsedPct: pct(reserved, h.cfg.demoBudgetMB),
 	}

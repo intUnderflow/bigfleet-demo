@@ -507,9 +507,10 @@ async function sampleStats(env: Env): Promise<void> {
   const caps = await Promise.all(runners.map((r) => capacityStatsOf(env, r)));
   const free = caps.reduce((a, c) => a + c.free, 0);
   const busy = caps.reduce((a, c) => a + c.busy, 0);
+  const warm = caps.reduce((a, c) => a + c.warm, 0);
   const qd = await queueDepth(env);
   try {
-    env.STATS?.writeDataPoint({ indexes: ["capacity"], blobs: [], doubles: [free, busy, qd] });
+    env.STATS?.writeDataPoint({ indexes: ["capacity"], blobs: [], doubles: [free, busy, qd, warm] });
   } catch {}
 
   for (const r of runners) {
@@ -526,17 +527,28 @@ async function sampleStats(env: Env): Promise<void> {
   }
 }
 
-async function capacityStatsOf(env: Env, runner: string): Promise<{ free: number; busy: number }> {
+// busy = sessions actually serving a visitor; free = slots not serving a visitor (some of which
+// are the warm pool, surfaced separately). NOT headroom/runningSessions, which count the pool.
+async function capacityStatsOf(
+  env: Env,
+  runner: string,
+): Promise<{ busy: number; free: number; warm: number }> {
   try {
     const r = await fetch(runner + "/v1/capacity", {
       headers: { "X-Demo-Key": env.DEMOHOST_KEY },
       cf: { cacheTtl: 0 },
     } as RequestInit);
-    if (!r.ok) return { free: 0, busy: 0 };
-    const v = (await r.json()) as { headroomSessions?: number; runningSessions?: number };
-    return { free: Math.max(0, v.headroomSessions || 0), busy: Math.max(0, v.runningSessions || 0) };
+    if (!r.ok) return { busy: 0, free: 0, warm: 0 };
+    const v = (await r.json()) as {
+      maxSessions?: number;
+      visitorSessions?: number;
+      warmReady?: number;
+    };
+    const max = Math.max(0, v.maxSessions || 0);
+    const busy = Math.max(0, v.visitorSessions || 0);
+    return { busy, free: Math.max(0, max - busy), warm: Math.max(0, v.warmReady || 0) };
   } catch {
-    return { free: 0, busy: 0 };
+    return { busy: 0, free: 0, warm: 0 };
   }
 }
 
@@ -597,8 +609,9 @@ async function statsPage(env: Env): Promise<Response> {
   const caps = await Promise.all(runners.map((r) => capacityStatsOf(env, r)));
   const freeNow = caps.reduce((a, c) => a + c.free, 0);
   const busyNow = caps.reduce((a, c) => a + c.busy, 0);
+  const warmNow = caps.reduce((a, c) => a + c.warm, 0);
   const qNow = await queueDepth(env);
-  return html(renderStats({ outcomes, sess, capTs, sessTs, funnel, freeNow, busyNow, qNow, configured: !!env.CF_API_TOKEN }));
+  return html(renderStats({ outcomes, sess, capTs, sessTs, funnel, freeNow, busyNow, warmNow, qNow, configured: !!env.CF_API_TOKEN }));
 }
 
 function spark(series: { values: number[]; color: string }[], w = 300, h = 48): string {
@@ -625,6 +638,7 @@ function renderStats(d: {
   funnel: any[];
   freeNow: number;
   busyNow: number;
+  warmNow: number;
   qNow: number;
   configured: boolean;
 }): string {
@@ -740,11 +754,12 @@ ${banner}
 
 <h2>Right now</h2>
 <div class="grid">
-  ${card("slots busy", n(d.busyNow), slots > 0 ? pct(d.busyNow, slots) + "% of " + n(slots) + " servable" : "no runners")}
-  ${card("slots free", n(d.freeNow))}
+  ${card("in use by visitors", n(d.busyNow), slots > 0 ? pct(d.busyNow, slots) + "% of " + n(slots) + " slots" : "no runners")}
+  ${card("free", n(d.freeNow))}
+  ${card("warm pool ready", n(d.warmNow), "pre-warmed, instant dive-in")}
   ${card("waiting in queue", n(d.qNow))}
 </div>
-<div class="bar" title="busy vs free"><i style="width:${slots > 0 ? pct(d.busyNow, slots) : 0}%;background:#2563eb"></i><i style="width:${slots > 0 ? 100 - pct(d.busyNow, slots) : 100}%;background:#3a8a52"></i></div>
+<div class="bar" title="in use vs free"><i style="width:${slots > 0 ? pct(d.busyNow, slots) : 0}%;background:#2563eb"></i><i style="width:${slots > 0 ? 100 - pct(d.busyNow, slots) : 100}%;background:#3a8a52"></i></div>
 
 <h2>Homepage &quot;Demo&quot; button</h2>
 <div class="grid">
@@ -772,7 +787,7 @@ ${banner}
 <div class="grid" style="margin-top:12px">${engage}</div>
 
 <h2>Over time (hourly)</h2>
-${chart("Slots free vs busy", `<span class="dot" style="background:#3a8a52"></span>free &nbsp; <span class="dot" style="background:#2563eb"></span>busy`, spark([{ values: free, color: "#3a8a52" }, { values: busy, color: "#2563eb" }]))}
+${chart("Slots in use vs free", `<span class="dot" style="background:#3a8a52"></span>free &nbsp; <span class="dot" style="background:#2563eb"></span>in use`, spark([{ values: free, color: "#3a8a52" }, { values: busy, color: "#2563eb" }]))}
 ${chart("Queue depth", `<span class="dot" style="background:#f5a623"></span>visitors waiting`, spark([{ values: qd, color: "#f5a623" }]))}
 ${chart("Completed sessions per hour", `<span class="dot" style="background:#60a5fa"></span>sessions`, spark([{ values: sphv, color: "#60a5fa" }]))}
 
