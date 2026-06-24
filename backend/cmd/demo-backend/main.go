@@ -1029,44 +1029,30 @@ func runScenario(ctx context.Context, clusters []cluster, name string) {
 		if len(clusters) < 2 {
 			return
 		}
-		// Normalize to the move's precondition from ANY prior state (rest, or post saturate/critical
-		// which leave the fleet on BILLED cloud): set cluster-a to its standing DONOR level (not
-		// whatever it currently is — saturate leaves it at 40), clear every other cluster's demand,
-		// clear all critical. Then wait until the fleet has drained back onto committed (cloud == 0)
-		// — only THEN reclaim, so the "$/hr stays $0" narration is never shown while cloud is up.
-		if capNow().CloudInUse > 0 {
-			pushFeed("▶ Returning the fleet to its at-rest committed state before the move…")
-		}
-		for i := range clusters {
-			setTierReplicas(ctx, &clusters[i], "critical", 0)
-			d := 0
-			if i == 0 {
-				d = 16 // cluster-a is the donor
-			}
-			setTierReplicas(ctx, &clusters[i], "demand", d)
-		}
-		if !waitFor(ctx, 150*time.Second, func() bool {
-			// committed headroom for the reclaim — NOT cloud==0 (a heavy prior saturate can leave
-			// a node or two the engine hasn't consolidated; the reclaim's $0-ness is about B drawing
-			// freed COMMITTED, not the absolute cloud total).
-			return capNow().OnpremIdle >= 6 && clusterNodesNow(clusters[0].name) >= 14
-		}) {
+		// The move is the from-REST lead payoff: cluster-a's standing donor demand is reclaimed to
+		// cluster-b, entirely within committed ($0). If the fleet ISN'T at rest — e.g. right after
+		// saturate/critical, which leave it on billed cloud and a chaotically-draining mix — we do
+		// NOT fake it (that's how the "$/hr stays $0" line could become a lie). Ask for a reset
+		// instead; Reset restores the at-rest busy fleet. (Tolerate one unconsolidated cloud node.)
+		ensureMu.Lock()
+		aDemand := demandLevel[clusters[0].name]["demand"]
+		ensureMu.Unlock()
+		if capNow().CloudInUse > 1 || aDemand < 8 {
+			pushFeed("▶ The fleet isn't at its at-rest state yet (a previous scenario is still draining). Press ↺ Reset, then Move.")
 			return
 		}
-		// Drop A FIRST and wait for its committed nodes to drain back to the shared Idle pool —
-		// only THEN spike B, so B draws the FREED committed (reuse, $0) instead of bursting fresh
-		// cloud. B's spike is sized within the freed slice, so $/hr stays $0 across the whole move.
+		// Drop cluster-a's donor demand, wait for it to drain back to the shared Idle pool, THEN
+		// spike cluster-b within the freed committed slice — B reuses committed, no fresh cloud.
 		pushFeed("➡ Dropping cluster-a's production demand — its committed nodes drain back to the shared Idle pool…")
 		setTierReplicas(ctx, &clusters[0], "demand", 0)
 		if !waitFor(ctx, 60*time.Second, func() bool { return clusterNodesNow(clusters[0].name) <= 16 }) {
 			return
 		}
-		// Claim the absolute "$/hr stays $0" only when it's actually true (the common from-rest
-		// path); after a prior saturate there may be residual cloud still draining, so then claim
-		// only what the MOVE itself does — provisions no new cloud (B reuses freed committed).
-		costLine := "the move itself provisions NO new cloud — cluster-b reuses cluster-a's freed committed capacity."
-		if capNow().CostPerHour == 0 {
-			costLine = "that capacity reused, NO new cloud spend ($/hr stays $0)."
+		// Claim absolute "$/hr stays $0" only when it's actually true; if a stray node lingered,
+		// claim only what the MOVE itself does (provisions no new cloud — B reuses freed committed).
+		costLine := "that capacity reused, NO new cloud spend ($/hr stays $0)."
+		if capNow().CostPerHour != 0 {
+			costLine = "the move itself provisions no new cloud — cluster-b reuses cluster-a's freed committed capacity."
 		}
 		pushFeed("➡ …and now cluster-b grows from the committed capacity cluster-a just freed, drawn from the shared Idle pool — " + costLine)
 		setTierReplicas(ctx, &clusters[1], "demand", 14)
