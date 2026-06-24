@@ -60,7 +60,7 @@ type clusterState struct {
 	PodsPending  int            `json:"podsPending"`
 	BatchPending int            `json:"batchPending"` // pending low-priority BATCH pods — the preemption victim under scarcity (§4)
 	Demand       int            `json:"demand"`    // standard demand-tier pods (user-controlled)
-	Critical     int            `json:"critical"`  // critical demand-tier pods (section 8)
+	Critical     int            `json:"critical"`  // critical demand-tier pods (section 4)
 	Baseline     int            `json:"baseline"`  // baseline-tier pods (pre-loaded)
 	Dashboard    string         `json:"dashboard"` // URL of this cluster's Kubernetes dashboard
 }
@@ -719,7 +719,7 @@ func scrapeShard(addr string) map[string]int {
 // service Deployments.
 // Three tiers: baseline batch (preemptible filler), demand (standard production —
 // PriorityClass "production", preemptionPolicy Never, so it provisions rather than
-// evicting batch), and critical (PriorityClass "critical" — the section-8 beat that
+// evicting batch), and critical (PriorityClass "critical" — the section-4 beat that
 // genuinely preempts batch under scarcity).
 var tierNS = map[string]string{"baseline": "batch", "demand": "production", "critical": "production-critical"}
 var batchServices = []string{"etl-pipeline", "ml-training", "analytics-rollup", "data-export", "log-archival", "nightly-report", "backup-runner", "clickstream-agg"}
@@ -736,7 +736,7 @@ func tierPriorityClass(tier string) string {
 	case "demand":
 		return "production" // higher than batch, but preemptionPolicy:Never -> scales out, never evicts batch
 	case "critical":
-		return "critical" // preempts batch (section 8)
+		return "critical" // preempts batch (section 4)
 	default:
 		return "batch"
 	}
@@ -961,7 +961,7 @@ func seedBusyFleet(clusters []cluster, baseline, donorDemand int) {
 }
 
 // POST /api/demand {workspace, level, tier?} -> set that cluster's demand-tier replica
-// total. tier defaults to "demand" (standard production, non-preempting); section 8 sends
+// total. tier defaults to "demand" (standard production, non-preempting); section 4 sends
 // tier:"critical" to drive the preempting tier.
 func demandHandler(clusters []cluster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -997,7 +997,7 @@ func resetHandler(clusters []cluster, baseline, donorDemand int) http.HandlerFun
 
 // ---- staged scenarios (deterministic teaching beats) ----
 //
-// The §6/§7/§8 buttons drive the fleet to the required PRECONDITION, then inject the beat
+// The §3/§4/§7 buttons drive the fleet to the required PRECONDITION, then inject the beat
 // and narrate it — so the lesson reproduces on every click (a thin demand-poke can't
 // guarantee a full/contended fleet). One scenario runs at a time; reset or a new one
 // cancels it. Narration is honest: the scenario states what it's about to do; the viewer
