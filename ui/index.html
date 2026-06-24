@@ -398,12 +398,15 @@ function typeSegs(byType, prefix){
 // (per-SKU in use / available headroom), plus the honest on-demand $/hr.
 function renderSupply(st){
   const c=st.capacity||{};
-  // Committed: ONE in-use segment + idle. The per-SKU split (on-prem vs AWS reserved) is
-  // folded into a hover title instead of always-on segments — realism on demand, not clutter.
-  drawBar('supply-onprem', c.onpremTotal||1, [
-    {key:'cm-inuse', n:c.onpremInUse||0, color:'var(--onprem)', label:'in use '},
-    {key:'own-idle', n:c.onpremIdle||0, cls:'owned-idle', label:'idle '},
-  ]);
+  // Committed in-use SPLIT BY PROVIDER — on-prem owned vs AWS reserved (both committed, $0 at
+  // the margin) — then idle. Grouped by provider, not the verbose instance-type SKU (that stays
+  // in the hover title), so the owned-vs-reserved split is legible without the clutter.
+  const cmByProv={};
+  Object.keys(c.committedByType||{}).forEach(t=>{ const p=providerOfType(t); cmByProv[p]=(cmByProv[p]||0)+(c.committedByType[t]||0); });
+  const cmSegs=Object.keys(cmByProv).sort((a,b)=>(PROV_ORDER[a]||0)-(PROV_ORDER[b]||0)).map(p=>(
+    {key:'cm-'+p, n:cmByProv[p], color:CLOUD_COLORS[p], label:(p==='On-prem'?'on-prem ':p+' reserved ')}));
+  cmSegs.push({key:'own-idle', n:c.onpremIdle||0, cls:'owned-idle', label:'idle '});
+  drawBar('supply-onprem', c.onpremTotal||1, cmSegs);
   const cmSku=Object.keys(c.committedByType||{}).sort().map(t=>providerOfType(t)+' '+t+' '+c.committedByType[t]).join(' · ');
   const elOn=document.getElementById('supply-onprem'); if(elOn) elOn.title=cmSku||'';
   document.getElementById('fig-onprem').textContent=`${c.onpremInUse||0} / ${c.onpremTotal||0} in use · $0`;
@@ -437,7 +440,8 @@ function renderSupply(st){
   // Compact, adaptive legend — spot only appears once it's actually in use.
   const hasSpot=spot>0;
   if(hasSpot!==legSpot){ legSpot=hasSpot;
-    const leg=[`<span><span class="dot" style="background:var(--onprem)"></span>committed in use</span>`,
+    const leg=[`<span><span class="dot" style="background:var(--onprem)"></span>committed &middot; on-prem</span>`,
+               `<span><span class="dot" style="background:var(--aws)"></span>committed &middot; AWS reserved</span>`,
                `<span><span class="dot" style="background:var(--onprem-idle)"></span>idle ($0)</span>`,
                `<span><span class="dot" style="background:var(--gcp)"></span>on-demand</span>`];
     if(hasSpot) leg.push(`<span><span class="dot" style="background:var(--spot)"></span>spot</span>`);
