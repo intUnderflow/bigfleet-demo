@@ -191,7 +191,7 @@
 
       <section>
         <h2><span class="n">1</span>Not another cluster autoscaler</h2>
-        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reclaiming idle nodes in one cluster to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. Same finite pool you already own, reallocated across clusters.</p>
+        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reallocating one cluster&rsquo;s freed-up committed capacity to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. Same finite pool you already own, reallocated across clusters.</p>
         <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated cloud.</p>
       </section>
 
@@ -202,12 +202,12 @@
 
       <section>
         <h2><span class="n">3</span>Capacity moves between clusters</h2>
-        <p>Here&rsquo;s the payoff. <b>cluster-B</b> gets a burst of demand its nodes can&rsquo;t hold. A per-cluster autoscaler would <b>buy a brand-new node</b>. Watch BigFleet instead <b>reclaim cluster-A's idle capacity and hand it to cluster-B</b> — the same committed pool you already own, reallocated across clusters: no new spend, no waiting on the cloud.</p>
+        <p>Here&rsquo;s the payoff. You wind <b>cluster-A&rsquo;s production demand down</b> and <b>spike cluster-B&rsquo;s</b> — a routine traffic shift, and the committed pool is finite, so there&rsquo;s no room to grow into. A per-cluster autoscaler would leave cluster-A&rsquo;s freed nodes sitting idle and <b>buy cluster-B a brand-new node</b>. Watch BigFleet instead <b>reclaim the nodes cluster-A no longer needs and hand that freed capacity to cluster-B</b> — the same committed pool you already own, reallocated A&rarr;B: no new node, no new cloud spend on the move.</p>
         <div class="actions">
           <button class="action" data-scenario="move" onclick="scenario('move')">▶ Move capacity from cluster-A to cluster-B</button>
           <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
         </div>
-        <p class="small">This cross-cluster reallocation is BigFleet&rsquo;s real logic — idle capacity in one cluster serving unschedulable demand in another, both bound to one shard. Only the few seconds a node takes to drain on reclaim, and a replacement to come up in the other cluster, is a simulated dwell.</p>
+        <p class="small">This cross-cluster move is BigFleet&rsquo;s <b>real</b> control logic running against a simulated cloud. <i>You</i> changed the demand on both sides; BigFleet only reacts — as cluster-A&rsquo;s demand falls it reclaims A&rsquo;s freed nodes into the shard&rsquo;s shared <b>Idle</b> pool, then reuses that committed hardware for cluster-B rather than bursting new cloud. It genuinely <i>reasons about</i> cost (the dollar figures are illustrative constants, not quotes). The wait you watch — cluster-A&rsquo;s production draining, then cluster-B&rsquo;s nodes coming up — is a <b>simulated dwell</b>, not a measured transfer time: BigFleet&rsquo;s real decision, transfer speed simulated.</p>
       </section>
 
       <section>
