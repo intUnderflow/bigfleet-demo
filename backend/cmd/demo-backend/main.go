@@ -1029,26 +1029,24 @@ func runScenario(ctx context.Context, clusters []cluster, name string) {
 		if len(clusters) < 2 {
 			return
 		}
-		// Normalize to the move's precondition so the $0 promise holds from ANY prior state — not
-		// just rest. (After saturate/critical the fleet is on BILLED cloud; without this, the move
-		// would narrate "$/hr stays $0" while cloud is still up.) Clear the critical tier
-		// everywhere and clear demand on every cluster EXCEPT the donor (cluster-a), then wait
-		// until the fleet has drained back onto committed (cloud == 0). Only then do we reclaim.
+		// Normalize to the move's precondition from ANY prior state (rest, or post saturate/critical
+		// which leave the fleet on BILLED cloud): set cluster-a to its standing DONOR level (not
+		// whatever it currently is — saturate leaves it at 40), clear every other cluster's demand,
+		// clear all critical. Then wait until the fleet has drained back onto committed (cloud == 0)
+		// — only THEN reclaim, so the "$/hr stays $0" narration is never shown while cloud is up.
+		if capNow().CloudInUse > 0 {
+			pushFeed("▶ Returning the fleet to its at-rest committed state before the move…")
+		}
 		for i := range clusters {
 			setTierReplicas(ctx, &clusters[i], "critical", 0)
-			if i != 0 {
-				setTierReplicas(ctx, &clusters[i], "demand", 0)
+			d := 0
+			if i == 0 {
+				d = 16 // cluster-a is the donor
 			}
+			setTierReplicas(ctx, &clusters[i], "demand", d)
 		}
-		ensureMu.Lock()
-		aLoaded := demandLevel[clusters[0].name]["demand"] > 0 // donor present (the busy start loads cluster-a)?
-		ensureMu.Unlock()
-		if !aLoaded {
-			pushFeed("▶ Setup: loading cluster-a so it holds a slice of the shared committed pool — the move itself comes next…")
-			setTierReplicas(ctx, &clusters[0], "demand", 16)
-		}
-		if !waitFor(ctx, 90*time.Second, func() bool {
-			return capNow().CloudInUse == 0 && clusterNodesNow(clusters[0].name) >= 18
+		if !waitFor(ctx, 150*time.Second, func() bool {
+			return capNow().CloudInUse == 0 && clusterNodesNow(clusters[0].name) >= 14
 		}) {
 			return
 		}
