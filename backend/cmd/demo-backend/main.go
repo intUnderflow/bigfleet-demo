@@ -239,14 +239,18 @@ type sessionClock struct {
 }
 
 func newSessionClock(id string, ttl, idle time.Duration, now time.Time) *sessionClock {
-	return &sessionClock{id: id, ttl: ttl, startedAt: now, hardDeadline: now.Add(ttl), idleTimeout: idle, lastBeat: now}
+	// DORMANT until begin(): a warm-pool session must not burn its lifetime while it waits for a
+	// visitor, so startedAt/hardDeadline are left unset and snapshot() reports a non-expiring
+	// "pending" state until it's actually handed out. This makes the no-self-destruct guarantee
+	// independent of how --warm-max-age relates to --session-ttl.
+	return &sessionClock{id: id, ttl: ttl, idleTimeout: idle, lastBeat: now}
 }
 
 func (s *sessionClock) beat(now time.Time) { s.mu.Lock(); s.lastBeat = now; s.mu.Unlock() }
 
-// begin (re)starts the visitor-facing clock at hand-out. A warm-pool session's backend boots
-// minutes before a visitor is assigned it, so the hard deadline (and idle timer) must restart
-// from the moment it's claimed — otherwise the top-bar countdown is already partly spent.
+// begin STARTS the visitor-facing clock at hand-out. The clock is dormant until this fires, so
+// a warm-pool session that boots minutes (or longer) before a visitor is assigned it doesn't
+// burn any of its lifetime while it waits — the full ttl begins the moment it's claimed.
 // Idempotent: only the FIRST call (demohost's server-side hand-out) takes effect, so the
 // proxied /api/begin can't be replayed by the visitor's browser to extend the session.
 func (s *sessionClock) begin(now time.Time) {
@@ -276,10 +280,26 @@ type sessionStatus struct {
 
 func (s *sessionClock) snapshot(now time.Time) sessionStatus {
 	s.mu.Lock()
+	begun := s.begun
 	last := s.lastBeat
 	started := s.startedAt
 	hard := s.hardDeadline
 	s.mu.Unlock()
+	if !begun {
+		// Pending hand-out: the clock hasn't started, so report a full, NON-EXPIRING lifetime.
+		// A warm-pool session waiting to be claimed must never self-expire, regardless of how
+		// long it sits. (The deadlines roll with `now` so any accidental viewer sees a fresh ttl.)
+		full := now.Add(s.ttl)
+		return sessionStatus{
+			Hosted: true, ID: s.id,
+			StartedAt:    now.UTC().Format(time.RFC3339),
+			HardDeadline: full.UTC().Format(time.RFC3339),
+			IdleDeadline: full.UTC().Format(time.RFC3339),
+			ExpiresAt:    full.UTC().Format(time.RFC3339), ExpiresReason: "pending",
+			Now: now.UTC().Format(time.RFC3339), RemainingSeconds: int(s.ttl.Seconds()),
+			Expired: false,
+		}
+	}
 	idleDeadline := last.Add(s.idleTimeout)
 	exp, reason := hard, "scheduled"
 	if idleDeadline.Before(exp) {

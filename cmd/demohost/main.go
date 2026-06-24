@@ -416,19 +416,27 @@ func (h *host) takePooledLocked(now time.Time) *session {
 	return nil
 }
 
-// beginBackend tells a just-handed-out session's backend to (re)start the visitor-facing
-// clock NOW. A warm-pool backend booted minutes before the visitor arrived, so without this
-// its top-bar countdown and idle timer would already be partly spent. Best-effort + idempotent
-// on the backend (so the public /s/{id} proxy can't be used to extend a session).
+// beginBackend tells a just-handed-out session's backend to START the visitor-facing clock NOW.
+// The backend clock is dormant until this fires, so this is what gives the visitor their full
+// hour. Idempotent on the backend (so the public /s/{id} proxy can't be used to extend a
+// session). Retries briefly: if it never lands, the session simply stays "pending" (never
+// self-expires) and is still bounded by the demohost ExpiresAt hard cap as a backstop.
 func (h *host) beginBackend(s *session) {
 	cl := &http.Client{Timeout: 3 * time.Second}
-	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/api/begin", s.PortBase), nil)
-	resp, err := cl.Do(req)
-	if err != nil {
-		fmt.Printf("demohost: begin clock for %s failed: %v\n", s.ID, err)
-		return
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/begin", s.PortBase)
+	for attempt := 0; attempt < 3; attempt++ {
+		req, _ := http.NewRequest("POST", url, nil)
+		resp, err := cl.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			return
+		}
+		if attempt == 2 {
+			fmt.Printf("demohost: begin clock for %s failed after retries: %v\n", s.ID, err)
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	_ = resp.Body.Close()
 }
 
 func (h *host) poolLoop(ctx context.Context) {
