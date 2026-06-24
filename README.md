@@ -8,6 +8,16 @@ cheap **spot** while keeping interruption-sensitive work on stable **on-demand**
 
 It's a real, miniature BigFleet against a *simulated* substrate — and it's honest about which is which.
 
+> **⚠️ This repo is the demo's plumbing, not a product.** Unlike
+> [`bigfleet`](https://github.com/intUnderflow/bigfleet) and
+> [`bigfleet-providers`](https://github.com/intUnderflow/bigfleet-providers) — which are built and supported
+> for others to use — `bigfleet-demo` exists only to run *our* hosted demo at
+> [bigfleet-demo.lucy.sh](https://bigfleet-demo.lucy.sh). It **changes at random**, carries **no API / CLI /
+> CRD / output-format stability**, **no versioning or compatibility guarantees**, and **no intentional
+> support for running the stack yourself**. The docs here describe how *we* run it, for reference — they are
+> not a maintained how-to, and questions or PRs about self-hosting may go unanswered. Read it, learn from it,
+> lift ideas freely — just don't build on it.
+
 ## What's real, what's simulated
 
 - **Real** — the BigFleet engine and all three phases (assign / preempt / reclaim) with the
