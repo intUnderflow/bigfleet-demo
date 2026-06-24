@@ -125,16 +125,6 @@
   @keyframes pulse{0%,100%{opacity:.9}50%{opacity:.32}}
   .stat{display:flex;gap:12px;font-size:12px;color:var(--muted);margin-bottom:10px}
   .stat b{color:var(--ink)}
-  /* the cross-cluster shared pool — first-class so the move is SEEN, not just narrated */
-  .sharedpool .panel{border-color:var(--onprem);background:linear-gradient(180deg,rgba(52,211,153,.08),transparent)}
-  .sp-hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-  .sp-lbl{font-weight:600;font-size:14px;color:var(--onprem)}
-  .sp-sub{font-size:11.5px;color:var(--muted)}
-  .sp-row{display:flex;align-items:center;gap:10px;margin:9px 0 7px;flex-wrap:wrap}
-  .sp-n{font-size:27px;font-weight:700;color:var(--onprem);font-variant-numeric:tabular-nums;line-height:1;transition:color .3s}
-  .sp-unit{font-size:12px;color:var(--muted)}
-  .sp-tiles{display:flex;flex-wrap:wrap;gap:3px;margin-left:auto;max-width:62%;justify-content:flex-end}
-  .sp-note{font-size:11.5px;color:var(--muted);line-height:1.5}
   /* low-priority batch the scheduler displaced to place critical work (§4 preemption victim) */
   .tile.displaced{background:var(--idle);opacity:.5;animation:none;outline:1px dashed var(--bad);outline-offset:-1px}
   .crow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -304,7 +294,6 @@
           <div class="legend" id="legend"></div>
         </div>
       </div>
-      <div class="sec sharedpool" id="sharedpool"></div>
       <div class="sec">
         <h2>Clusters</h2>
         <div class="fleet" id="fleet"></div>
@@ -338,25 +327,7 @@ function initFunnel(){ if(_funnelInit)return; _funnelInit=true; track('landed');
       var nEl=e.target.querySelector('h2 .n'); if(nEl) track('section:'+nEl.textContent.trim()); } }); },{threshold:0.5});
     document.querySelectorAll('section').forEach(function(s){ if(s.querySelector('h2 .n')) io.observe(s); });
   } }
-function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderSharedPool(st); renderFleet(st); renderFeed(st); syncScenarioButtons(st); initFunnel(); }
-
-// The shared committed pool — the cross-cluster mechanism made VISIBLE. As 'move' runs you
-// watch cluster-a's tiles shrink, THIS idle count rise, then cluster-b draw it back down: one
-// finite pool, reallocated — not two independent autoscalers each buying their own node.
-var spLastIdle=-1;
-function renderSharedPool(st){
-  const c=st.capacity||{}, idle=c.onpremIdle||0;
-  if(idle===spLastIdle) return; spLastIdle=idle;
-  const tiles=Array.from({length:Math.min(idle,40)}).map(()=>`<div class="tile" style="background:var(--onprem-idle)"></div>`).join('');
-  document.getElementById('sharedpool').innerHTML=
-    `<div class="panel">`+
-      `<div class="sp-hd"><span class="sp-lbl">Shared committed pool</span>`+
-        `<span class="sp-sub"><b>any</b> cluster can draw from this &mdash; $0 to use</span></div>`+
-      `<div class="sp-row"><span class="sp-n">${idle}</span><span class="sp-unit">idle node${idle===1?'':'s'} &middot; free for any cluster now</span>`+
-        `<div class="sp-tiles">${tiles}</div></div>`+
-      `<div class="sp-note">Free a node in one cluster and it returns here for another to draw &mdash; <b>no new cloud, no new spend</b>. A per-cluster autoscaler can&rsquo;t do that.</div>`+
-    `</div>`;
-}
+function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); syncScenarioButtons(st); initFunnel(); }
 
 // While a scenario runs it self-establishes its precondition over tens of seconds; disable the
 // other triggers so a mis-click can't silently abandon it. Reset stays live (to cancel).
