@@ -113,7 +113,18 @@ type session struct {
 	Pooled     bool      `json:"pooled"` // a pre-warmed, not-yet-assigned session
 
 	lastSeenOK time.Time // last successful backend poll (reaper grace clock)
+	assignedAt time.Time // when handed to a visitor (pool hand-out or direct create); zero = never
 }
+
+// completion is a finished visitor session, kept in a small ring so the coordinator's stats
+// cron can scrape real session durations (the host is the only thing that knows them).
+type completion struct {
+	EndedAt     int64   `json:"endedAt"` // unix seconds
+	DurationSec float64 `json:"durationSec"`
+	Reason      string  `json:"reason"` // idle | hard cap | manual
+}
+
+const maxCompletions = 1000
 
 type host struct {
 	cfg config
@@ -122,10 +133,27 @@ type host struct {
 	sessions  map[string]*session
 	usedBases map[int]bool
 
+	completions []completion // ring of finished visitor sessions (for /v1/stats)
+
 	machineMB    int
 	memActualMB  int // last measured actual demo RSS (0 = unknown/not yet sampled)
 	memSampledAt time.Time
 	poolInFlight int // pooled sessions being created but not yet in the map (admission accounting)
+}
+
+// appendCompletionLocked records a finished visitor session. Caller holds h.mu. Sessions that
+// were never handed to a visitor (e.g. an unclaimed pooled session) have a zero assignedAt and
+// are skipped, so the stats only reflect real usage.
+func (h *host) appendCompletionLocked(s *session, reason string, now time.Time) {
+	if s.assignedAt.IsZero() {
+		return
+	}
+	h.completions = append(h.completions, completion{
+		EndedAt: now.Unix(), DurationSec: now.Sub(s.assignedAt).Seconds(), Reason: reason,
+	})
+	if len(h.completions) > maxCompletions {
+		h.completions = h.completions[len(h.completions)-maxCompletions:]
+	}
 }
 
 func newHost(cfg config) *host {
@@ -284,6 +312,7 @@ func (h *host) reapOnce() {
 		h.reap(s)
 		h.mu.Lock()
 		h.removeLocked(s.ID)
+		h.appendCompletionLocked(s, reason, now)
 		h.mu.Unlock()
 	}
 }
@@ -332,6 +361,7 @@ func (h *host) takePooledLocked(now time.Time) *session {
 			s.Pooled = false
 			s.State = "running"
 			s.lastSeenOK = now
+			s.assignedAt = now // visitor's session clock starts at hand-out
 			return s
 		}
 	}
@@ -506,6 +536,7 @@ func (h *host) createSession(w http.ResponseWriter, r *http.Request) {
 		ReservedMB: h.cfg.sessionMB,
 		State:      "starting",
 		lastSeenOK: now,
+		assignedAt: now, // direct-created for a waiting visitor — clock starts now
 	}
 	h.sessions[id] = s
 	h.usedBases[base] = true
@@ -554,6 +585,7 @@ func (h *host) deleteSession(w http.ResponseWriter, r *http.Request) {
 	h.reap(s)
 	h.mu.Lock()
 	h.removeLocked(id)
+	h.appendCompletionLocked(s, "manual", time.Now())
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]string{"reaped": id})
 }
@@ -616,6 +648,25 @@ func (h *host) capacityView() capacityView {
 
 func (h *host) capacity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.capacityView())
+}
+
+// stats returns finished visitor sessions newer than ?since=<unix-seconds>, so the coordinator's
+// stats cron can record real session durations without double-counting (it advances `since` to
+// the returned `now` each tick). The ring holds the most recent maxCompletions.
+func (h *host) stats(w http.ResponseWriter, r *http.Request) {
+	var since int64
+	if v := r.URL.Query().Get("since"); v != "" {
+		since, _ = strconv.ParseInt(v, 10, 64)
+	}
+	h.mu.Lock()
+	out := make([]completion, 0, len(h.completions))
+	for _, c := range h.completions {
+		if c.EndedAt > since {
+			out = append(out, c)
+		}
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"now": time.Now().Unix(), "completions": out})
 }
 
 // sessionProxy is the PUBLIC entry to a session: it reverse-proxies /s/{id}/... to that
@@ -701,6 +752,7 @@ func serveMain(args []string) {
 	mux.HandleFunc("GET /v1/sessions", h.auth(h.listSessions))
 	mux.HandleFunc("DELETE /v1/sessions/{id}", h.auth(h.deleteSession))
 	mux.HandleFunc("GET /v1/capacity", h.auth(h.capacity))
+	mux.HandleFunc("GET /v1/stats", h.auth(h.stats))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 	// public visitor surface — reverse-proxy to the session's backend (used by the coordinator)
 	mux.HandleFunc("/s/{id}/", h.sessionProxy)

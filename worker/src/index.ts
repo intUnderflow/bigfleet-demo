@@ -33,6 +33,9 @@ interface Env {
   RECAPTCHA_SECRET: string;
   RECAPTCHA_V2_SECRET: string;
   SESSIONS: KVNamespace;
+  STATS: AnalyticsEngineDataset; // /stats time-series (writes via binding; reads via SQL API)
+  CF_ACCOUNT_ID: string;
+  CF_API_TOKEN: string; // Account Analytics:Read — only used by /stats to query Analytics Engine
 }
 
 interface Assignment {
@@ -59,6 +62,9 @@ export default {
     if (url.pathname === "/_coordinator/health") {
       return new Response("ok\n", { headers: { "content-type": "text/plain" } });
     }
+    if (url.pathname === "/stats") {
+      return statsPage(env);
+    }
 
     const ip = visitorIP(request);
     const kvKey = KV_PREFIX + ip;
@@ -80,10 +86,17 @@ export default {
     if (url.searchParams.has("rc")) {
       if (await readAssignment(env, kvKey)) return Response.redirect(DEMO_URL, 302);
       const score = await scoreV3(env, url.searchParams.get("rc") || "", ip);
-      if (!(score >= minScore(env))) return Response.redirect(TOUR_URL, 302);
+      if (!(score >= minScore(env))) {
+        recordOutcome(env, "tour", "home", "lowscore");
+        return Response.redirect(TOUR_URL, 302);
+      }
       const fresh = await assignNew(env);
-      if (!fresh) return Response.redirect(TOUR_URL, 302);
+      if (!fresh) {
+        recordOutcome(env, "tour", "home", "full");
+        return Response.redirect(TOUR_URL, 302);
+      }
       await writeAssignment(env, kvKey, fresh);
+      recordOutcome(env, "demo", "home", "");
       return Response.redirect(DEMO_URL, 302);
     }
 
@@ -104,6 +117,12 @@ export default {
     // Direct hit, no session: serve the v3-then-v2 gate page (strong intent gets a real
     // chance to prove human, not an immediate bounce to the tour).
     return html(gatePage());
+  },
+
+  // Cron (every 5 min): snapshot capacity + queue depth, and scrape each runner's finished
+  // sessions, into the Analytics Engine time-series the /stats page reads.
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await sampleStats(env);
   },
 };
 
@@ -144,11 +163,13 @@ async function handleGate(
   if (fresh) {
     await writeAssignment(env, kvKey, fresh);
     await queueLeave(env, ip);
+    recordOutcome(env, "demo", "direct", "");
     return json({ ok: true });
   }
   // Passed reCAPTCHA but the fleet is full -> join the FIFO queue (direct-nav visitors only;
   // the homepage ?rc path instead falls through to the tour).
   const joinedAt = await queueTouch(env, ip);
+  recordOutcome(env, "queued", "direct", "full");
   return json({ queued: true, position: await queuePosition(env, joinedAt) });
 }
 
@@ -169,6 +190,7 @@ async function handleQueue(env: Env, ip: string, kvKey: string): Promise<Respons
     if (fresh) {
       await writeAssignment(env, kvKey, fresh);
       await queueLeave(env, ip);
+      recordOutcome(env, "promoted", "queue", "");
       return json({ ready: true });
     }
   }
@@ -438,4 +460,254 @@ a{color:#2563eb}
 })();
 </script>
 </body></html>`;
+}
+
+// ── /stats: usage analytics ──────────────────────────────────────────────────
+// Writes go through the Analytics Engine binding (no token); the page reads back via the SQL
+// API (needs CF_API_TOKEN). Schema: index1 = kind ("outcome" | "capacity" | "session").
+//   outcome:  blob1=outcome blob2=via blob3=reason   double1=1
+//   capacity: double1=free double2=busy double3=queueDepth
+//   session:  blob1=reason  double1=durationSec
+
+const STATS_DATASET = "bigfleet_demo_stats";
+
+/** Record a terminal visitor outcome (fire-and-forget) for the /stats time-series. */
+function recordOutcome(env: Env, outcome: string, via: string, reason: string): void {
+  try {
+    env.STATS?.writeDataPoint({ indexes: ["outcome"], blobs: [outcome, via, reason], doubles: [1] });
+  } catch {}
+}
+
+/** Cron body: snapshot fleet capacity + queue depth, and pull each runner's finished sessions. */
+async function sampleStats(env: Env): Promise<void> {
+  const runners = parseRunners(env);
+  const caps = await Promise.all(runners.map((r) => capacityStatsOf(env, r)));
+  const free = caps.reduce((a, c) => a + c.free, 0);
+  const busy = caps.reduce((a, c) => a + c.busy, 0);
+  const qd = await queueDepth(env);
+  try {
+    env.STATS?.writeDataPoint({ indexes: ["capacity"], blobs: [], doubles: [free, busy, qd] });
+  } catch {}
+
+  for (const r of runners) {
+    const ck = "statscursor:" + r;
+    const since = parseInt((await env.SESSIONS.get(ck)) || "0", 10) || 0;
+    const s = await fetchRunnerStats(env, r, since);
+    if (!s) continue;
+    for (const c of s.completions || []) {
+      try {
+        env.STATS?.writeDataPoint({ indexes: ["session"], blobs: [c.reason || ""], doubles: [c.durationSec || 0] });
+      } catch {}
+    }
+    if (typeof s.now === "number") await env.SESSIONS.put(ck, String(s.now));
+  }
+}
+
+async function capacityStatsOf(env: Env, runner: string): Promise<{ free: number; busy: number }> {
+  try {
+    const r = await fetch(runner + "/v1/capacity", {
+      headers: { "X-Demo-Key": env.DEMOHOST_KEY },
+      cf: { cacheTtl: 0 },
+    } as RequestInit);
+    if (!r.ok) return { free: 0, busy: 0 };
+    const v = (await r.json()) as { headroomSessions?: number; runningSessions?: number };
+    return { free: Math.max(0, v.headroomSessions || 0), busy: Math.max(0, v.runningSessions || 0) };
+  } catch {
+    return { free: 0, busy: 0 };
+  }
+}
+
+async function queueDepth(env: Env): Promise<number> {
+  let n = 0;
+  let cursor: string | undefined;
+  do {
+    const res: any = await env.SESSIONS.list({ prefix: QUEUE_PREFIX, cursor });
+    n += res.keys.length;
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+  return n;
+}
+
+async function fetchRunnerStats(
+  env: Env,
+  runner: string,
+  since: number,
+): Promise<{ now: number; completions: { durationSec: number; reason: string }[] } | null> {
+  try {
+    const r = await fetch(runner + "/v1/stats?since=" + since, {
+      headers: { "X-Demo-Key": env.DEMOHOST_KEY },
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as any;
+  } catch {
+    return null;
+  }
+}
+
+/** Run an Analytics Engine SQL query (returns the data rows, or [] on any failure). */
+async function aeQuery(env: Env, sql: string): Promise<any[]> {
+  if (!env.CF_API_TOKEN || !env.CF_ACCOUNT_ID) return [];
+  try {
+    const r = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/analytics_engine/sql`,
+      { method: "POST", headers: { Authorization: "Bearer " + env.CF_API_TOKEN }, body: sql },
+    );
+    if (!r.ok) return [];
+    const j = (await r.json()) as { data?: any[] };
+    return j.data || [];
+  } catch {
+    return [];
+  }
+}
+
+async function statsPage(env: Env): Promise<Response> {
+  const D = STATS_DATASET;
+  const W = "INTERVAL '7' DAY";
+  const [outcomes, sess, capTs, sessTs] = await Promise.all([
+    aeQuery(env, `SELECT blob1 AS outcome, blob2 AS via, sum(_sample_interval) AS n FROM ${D} WHERE index1='outcome' AND timestamp > NOW() - ${W} GROUP BY outcome, via`),
+    aeQuery(env, `SELECT sum(double1*_sample_interval)/sum(_sample_interval) AS avg_dur, sum(_sample_interval) AS n FROM ${D} WHERE index1='session' AND timestamp > NOW() - ${W}`),
+    aeQuery(env, `SELECT intDiv(toUInt32(timestamp),3600)*3600 AS t, sum(double1*_sample_interval)/sum(_sample_interval) AS free, sum(double2*_sample_interval)/sum(_sample_interval) AS busy, sum(double3*_sample_interval)/sum(_sample_interval) AS qd FROM ${D} WHERE index1='capacity' AND timestamp > NOW() - ${W} GROUP BY t ORDER BY t`),
+    aeQuery(env, `SELECT intDiv(toUInt32(timestamp),3600)*3600 AS t, sum(_sample_interval) AS n FROM ${D} WHERE index1='session' AND timestamp > NOW() - ${W} GROUP BY t ORDER BY t`),
+  ]);
+  const runners = parseRunners(env);
+  const caps = await Promise.all(runners.map((r) => capacityStatsOf(env, r)));
+  const freeNow = caps.reduce((a, c) => a + c.free, 0);
+  const busyNow = caps.reduce((a, c) => a + c.busy, 0);
+  const qNow = await queueDepth(env);
+  return html(renderStats({ outcomes, sess, capTs, sessTs, freeNow, busyNow, qNow, configured: !!env.CF_API_TOKEN }));
+}
+
+function spark(series: { values: number[]; color: string }[], w = 300, h = 48): string {
+  const all = series.flatMap((s) => s.values);
+  if (!all.length) return `<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}"></svg>`;
+  const max = Math.max(1, ...all);
+  let lines = "";
+  for (const s of series) {
+    if (!s.values.length) continue;
+    const step = s.values.length > 1 ? w / (s.values.length - 1) : w;
+    const pts = s.values
+      .map((v, i) => `${(i * step).toFixed(1)},${(h - (v / max) * (h - 4) - 2).toFixed(1)}`)
+      .join(" ");
+    lines += `<polyline fill="none" stroke="${s.color}" stroke-width="2" points="${pts}"/>`;
+  }
+  return `<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${lines}</svg>`;
+}
+
+function renderStats(d: {
+  outcomes: any[];
+  sess: any[];
+  capTs: any[];
+  sessTs: any[];
+  freeNow: number;
+  busyNow: number;
+  qNow: number;
+  configured: boolean;
+}): string {
+  const num = (x: any) => (typeof x === "number" ? x : parseFloat(x) || 0);
+  const oc = (outcome: string, via: string) =>
+    d.outcomes
+      .filter((r) => r.outcome === outcome && r.via === via)
+      .reduce((a, r) => a + num(r.n), 0);
+
+  const homeDemo = oc("demo", "home");
+  const homeTour = oc("tour", "home");
+  const directDemo = oc("demo", "direct");
+  const directQueued = oc("queued", "direct");
+  const promoted = oc("promoted", "queue");
+  const homeTotal = homeDemo + homeTour;
+  const liveTotal = homeDemo + directDemo + promoted;
+  const avgDur = d.sess[0] ? num(d.sess[0].avg_dur) : 0;
+  const sessN = d.sess[0] ? num(d.sess[0].n) : 0;
+  const slots = d.freeNow + d.busyNow;
+
+  const pct = (a: number, t: number) => (t > 0 ? Math.round((a / t) * 100) : 0);
+  const dur = (s: number) =>
+    s >= 60 ? Math.floor(s / 60) + "m " + Math.round(s % 60) + "s" : Math.round(s) + "s";
+  const n = (x: number) => Math.round(x).toLocaleString();
+
+  const free = d.capTs.map((r) => num(r.free));
+  const busy = d.capTs.map((r) => num(r.busy));
+  const qd = d.capTs.map((r) => num(r.qd));
+  const sphv = d.sessTs.map((r) => num(r.n));
+
+  const banner = d.configured
+    ? ""
+    : `<div class="warn">Stats collection is running, but this page can't query yet — set the <code>CF_API_TOKEN</code> Worker secret (a Cloudflare API token with <b>Account Analytics: Read</b>). It fills in once that's set and data accrues.</div>`;
+
+  const card = (label: string, value: string, sub = "") =>
+    `<div class="card"><div class="v">${value}</div><div class="l">${label}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`;
+  const chart = (title: string, legend: string, svg: string) =>
+    `<div class="chart"><div class="ct">${title}</div><div class="cl">${legend}</div>${svg}</div>`;
+
+  return `<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BigFleet demo — usage stats</title>
+<style>
+:root{color-scheme:dark light}
+body{margin:0;background:#17181c;color:#edeef3;font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+@media(prefers-color-scheme:light){body{background:#f6f7f9;color:#17181c}}
+.wrap{max-width:880px;margin:0 auto;padding:40px 22px 64px}
+.logo{display:inline-flex;gap:9px;align-items:center;font-weight:600;font-size:18px;color:#2563eb}
+h1{font-size:22px;margin:14px 0 2px}
+.sub{color:#888c96;margin:0 0 26px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:#888c96;margin:30px 0 12px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.card{background:#1f2127;border:1px solid #2c2f37;border-radius:12px;padding:16px}
+@media(prefers-color-scheme:light){.card{background:#fff;border-color:#e3e5ea}}
+.card .v{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+.card .l{color:#888c96;font-size:13px;margin-top:2px}
+.card .s{color:#6b7280;font-size:12px;margin-top:6px}
+.bar{height:8px;border-radius:5px;background:#2c2f37;overflow:hidden;margin-top:10px;display:flex}
+.bar>i{display:block;height:100%}
+.chart{background:#1f2127;border:1px solid #2c2f37;border-radius:12px;padding:16px;margin-top:12px}
+@media(prefers-color-scheme:light){.chart{background:#fff;border-color:#e3e5ea}}
+.chart .ct{font-weight:600;font-size:14px}
+.chart .cl{color:#888c96;font-size:12px;margin:1px 0 8px}
+.warn{background:#3b2f12;border:1px solid #6b5418;color:#f2d999;border-radius:10px;padding:12px 14px;margin-bottom:22px;font-size:13.5px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:middle;margin-right:4px}
+code{background:#2c2f37;padding:1px 5px;border-radius:5px;font-size:12.5px}
+a{color:#2563eb}
+.note{color:#6b7280;font-size:12.5px;margin-top:30px;border-top:1px solid #2c2f37;padding-top:16px}
+</style></head><body><div class="wrap">
+<div class="logo"><svg viewBox="0 0 64 64" width="22" height="22"><rect x="6" y="20" width="14" height="14" rx="2" fill="#2563eb"/><rect x="25" y="14" width="14" height="14" rx="2" fill="#3b82f6"/><rect x="44" y="20" width="14" height="14" rx="2" fill="#60a5fa"/><rect x="6" y="40" width="14" height="14" rx="2" fill="#1d4ed8"/><rect x="25" y="34" width="14" height="14" rx="2" fill="#2563eb"/><rect x="44" y="40" width="14" height="14" rx="2" fill="#3b82f6"/></svg><span>BigFleet demo</span></div>
+<h1>Usage stats</h1>
+<p class="sub">How the live demo is being used. Last 7 days unless noted.</p>
+${banner}
+
+<h2>Right now</h2>
+<div class="grid">
+  ${card("slots busy", n(d.busyNow), slots > 0 ? pct(d.busyNow, slots) + "% of " + n(slots) + " servable" : "no runners")}
+  ${card("slots free", n(d.freeNow))}
+  ${card("waiting in queue", n(d.qNow))}
+</div>
+<div class="bar" title="busy vs free"><i style="width:${slots > 0 ? pct(d.busyNow, slots) : 0}%;background:#2563eb"></i><i style="width:${slots > 0 ? 100 - pct(d.busyNow, slots) : 100}%;background:#3a8a52"></i></div>
+
+<h2>Homepage &quot;Demo&quot; button</h2>
+<div class="grid">
+  ${card("&rarr; into the live demo", n(homeDemo), pct(homeDemo, homeTotal) + "% of clicks")}
+  ${card("&rarr; sent to the tour", n(homeTour), pct(homeTour, homeTotal) + "% of clicks")}
+  ${card("total button clicks", n(homeTotal))}
+</div>
+
+<h2>Direct visits to bigfleet-demo.lucy.sh</h2>
+<div class="grid">
+  ${card("&rarr; straight into the demo", n(directDemo))}
+  ${card("&rarr; joined the queue", n(directQueued))}
+  ${card("promoted from queue", n(promoted))}
+</div>
+
+<h2>Sessions</h2>
+<div class="grid">
+  ${card("completed sessions", n(sessN))}
+  ${card("avg session length", sessN > 0 ? dur(avgDur) : "&mdash;")}
+  ${card("served into the demo", n(liveTotal), "button + direct + queue")}
+</div>
+
+<h2>Over time (hourly)</h2>
+${chart("Slots free vs busy", `<span class="dot" style="background:#3a8a52"></span>free &nbsp; <span class="dot" style="background:#2563eb"></span>busy`, spark([{ values: free, color: "#3a8a52" }, { values: busy, color: "#2563eb" }]))}
+${chart("Queue depth", `<span class="dot" style="background:#f5a623"></span>visitors waiting`, spark([{ values: qd, color: "#f5a623" }]))}
+${chart("Completed sessions per hour", `<span class="dot" style="background:#60a5fa"></span>sessions`, spark([{ values: sphv, color: "#60a5fa" }]))}
+
+<p class="note">Numbers illustrate demo traffic, not a benchmark. Capacity and queue depth are sampled every 5 minutes; session lengths are measured by each runner from hand-out to reap. Stored in Cloudflare Analytics Engine (~90-day retention). Back to <a href="https://bigfleet.lucy.sh/">BigFleet</a>.</p>
+</div></body></html>`;
 }
