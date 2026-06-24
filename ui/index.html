@@ -102,10 +102,7 @@
   .supply .seg.avail{background:repeating-linear-gradient(45deg,var(--hair),var(--hair) 6px,var(--track) 6px,var(--track) 12px);color:var(--muted)}
   .cost{font-size:13px;margin:11px 0 2px;font-weight:600;color:var(--ink)}
   .cost .z{color:var(--real)} .cost .b{color:var(--sim)}
-  .cost .note{display:block;font-weight:400;font-size:11.5px;color:var(--muted);margin-top:2px}
   .cost .proj{font-weight:400;font-size:11.5px;color:var(--muted)}
-  .rate{font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.5}
-  .rate b{color:var(--ink);font-weight:600}
   .scoreboard{display:flex;gap:0;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:2px 0;margin-bottom:14px}
   .scoreboard .sb{flex:1 1 0;min-width:96px;padding:9px 14px;border-right:1px solid var(--line)}
   .scoreboard .sb:last-child{border-right:0}
@@ -113,8 +110,6 @@
   .scoreboard .sb .v{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--ink);margin-top:2px;line-height:1.1}
   .scoreboard .sb .s{font-size:10.5px;color:var(--muted);margin-top:1px}
   .scoreboard .sb .v.green{color:var(--onprem)} .scoreboard .sb .v.amber{color:var(--aws)} .scoreboard .sb .v.zero{color:var(--muted)} .scoreboard .sb .v.spot{color:var(--spot)}
-  .scale{font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.5;border-top:1px solid var(--hair);padding-top:9px}
-  .scale b{color:var(--ink-2);font-weight:600}
   .cap{font-size:12px;color:var(--muted);margin-top:8px}
   .legend{display:flex;gap:13px;margin-top:9px;font-size:12px;color:var(--muted);flex-wrap:wrap}
   .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
@@ -293,21 +288,19 @@
         <div class="panel">
           <div class="pool">
             <div class="pool-hd">
-              <span class="pool-name"><span class="dot" style="background:var(--onprem)"></span>Committed<span class="pool-sub">owned on-prem or reserved cloud · already paid · $0 to add work</span></span>
+              <span class="pool-name"><span class="dot" style="background:var(--onprem)"></span>Committed<span class="pool-sub">already paid · $0 to add work</span></span>
               <span class="pool-fig" id="fig-onprem"></span>
             </div>
             <div class="supply" id="supply-onprem"></div>
           </div>
           <div class="pool">
             <div class="pool-hd">
-              <span class="pool-name"><span class="dot" style="background:var(--gcp)"></span>Cloud<span class="pool-sub">GCP / AWS · on-demand + <b style="color:var(--spot)">spot</b> · pay-per-use · $0 until provisioned</span></span>
+              <span class="pool-name"><span class="dot" style="background:var(--gcp)"></span>Cloud<span class="pool-sub">pay-per-use · $0 until provisioned</span></span>
               <span class="pool-fig" id="fig-cloud"></span>
             </div>
             <div class="supply" id="supply-cloud"></div>
           </div>
           <div class="cost" id="cost"></div>
-          <div class="rate" id="rate"></div>
-          <div class="scale">A deliberately small <b>120-node teaching slice</b>. Real production fleets run hundreds to tens of thousands of nodes across many clusters — BigFleet&rsquo;s per-cluster cost-first logic is <b>identical at any scale</b>; only the pool of trapped capacity it reasons over grows.</div>
           <div class="legend" id="legend"></div>
         </div>
       </div>
@@ -327,7 +320,7 @@
 const CLOUD_COLORS={'On-prem':'var(--onprem)',GCP:'var(--gcp)',AWS:'var(--aws)',Azure:'var(--azure)'};
 const CLOUD_PROVIDERS=['GCP','AWS'];          // the elastic (billed) providers
 let last={}, lastFeedLen=0, clouds=['On-prem','GCP','AWS'];
-let legendDrawn=false;
+let legSpot=-1;
 const sig={feed:''};
 
 const es=new EventSource('/api/stream');
@@ -358,10 +351,10 @@ function renderSharedPool(st){
   document.getElementById('sharedpool').innerHTML=
     `<div class="panel">`+
       `<div class="sp-hd"><span class="sp-lbl">Shared committed pool</span>`+
-        `<span class="sp-sub">owned capacity (on-prem + reserved) that <b>any</b> cluster can draw from &mdash; $0 to use</span></div>`+
-      `<div class="sp-row"><span class="sp-n">${idle}</span><span class="sp-unit">idle node${idle===1?'':'s'} &middot; available to any cluster now</span>`+
+        `<span class="sp-sub"><b>any</b> cluster can draw from this &mdash; $0 to use</span></div>`+
+      `<div class="sp-row"><span class="sp-n">${idle}</span><span class="sp-unit">idle node${idle===1?'':'s'} &middot; free for any cluster now</span>`+
         `<div class="sp-tiles">${tiles}</div></div>`+
-      `<div class="sp-note">When a cluster frees a node, that committed capacity returns to this pool; another cluster draws on it &mdash; reallocated across the fleet, <b>no new cloud, no new spend</b>. That cross-cluster reuse is the thing a per-cluster autoscaler can&rsquo;t do.</div>`+
+      `<div class="sp-note">Free a node in one cluster and it returns here for another to draw &mdash; <b>no new cloud, no new spend</b>. A per-cluster autoscaler can&rsquo;t do that.</div>`+
     `</div>`;
 }
 
@@ -380,17 +373,17 @@ function syncScenarioButtons(st){
 function renderScore(st){
   const c=st.capacity||{}, cap=st.fleetSize||120;
   const live=(c.onpremInUse||0)+(c.cloudInUse||0);
-  const headroom=(c.onpremIdle||0)+(c.cloudAvailable||0);
   const cost=c.costPerHour||0;
   const pending=(st.clusters||[]).reduce((a,x)=>a+(x.podsPending||0),0);
+  // Four at-a-glance stats; On-demand+Spot fold into one Cloud cell (the bar shows the split
+  // once cloud is in use). Pending only surfaces when work is actually waiting on capacity.
   const cells=[
     {k:'Fleet in use', v:`${live} / ${cap}`, s:'nodes carrying work', cls:''},
     {k:'Committed ($0)', v:`${c.onpremInUse||0} / ${c.onpremTotal||0}`, s:'owned + reserved', cls:'green'},
-    {k:'On-demand', v:`${c.onDemandInUse||0}`, s:'metered cloud', cls:(c.onDemandInUse>0?'amber':'zero')},
-    {k:'Spot', v:`${c.spotInUse||0}`, s:'cheap · interruptible', cls:(c.spotInUse>0?'spot':'zero')},
+    {k:'Cloud', v:`${c.cloudInUse||0}`, s:c.cloudInUse>0?'metered · pay-per-use':'none — $0 headroom', cls:(c.cloudInUse>0?'amber':'zero')},
     {k:'Cloud $/hr', v:`$${cost.toFixed(2)}`, s:cost>0?'illustrative':'$0 at the margin', cls:(cost>0?'amber':'zero')},
-    {k:'Pending', v:`${pending}`, s:pending>0?'waiting on capacity':'all placed', cls:(pending>0?'amber':'zero')},
   ];
+  if(pending>0) cells.push({k:'Pending', v:`${pending}`, s:'waiting on capacity', cls:'amber'});
   document.getElementById('scoreboard').innerHTML=cells.map(x=>
     `<div class="sb"><div class="k">${x.k}</div><div class="v ${x.cls}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
 }
@@ -401,6 +394,10 @@ function renderScore(st){
 // new SKU slots in correctly while steady-state ticks don't reset the width transition.
 function drawBar(elId,total,segs){
   const el=document.getElementById(elId);
+  // Prune segments no longer present (e.g. cloud SKUs after a drain, or folded committed SKUs)
+  // so a transitioned-away segment doesn't linger at its last width.
+  const keys=new Set(segs.map(s=>s.key));
+  Array.from(el.children).forEach(ch=>{ if(!keys.has(ch.dataset.seg)) el.removeChild(ch); });
   segs.forEach((s,idx)=>{
     let d=el.querySelector('[data-seg="'+s.key+'"]');
     if(!d){ d=document.createElement('div'); d.className='seg'+(s.cls?' '+s.cls:''); d.dataset.seg=s.key;
@@ -430,51 +427,51 @@ function typeSegs(byType, prefix){
 // (per-SKU in use / available headroom), plus the honest on-demand $/hr.
 function renderSupply(st){
   const c=st.capacity||{};
-  drawBar('supply-onprem', c.onpremTotal||1,
-    typeSegs(c.committedByType, 'cm-').concat([{key:'own-idle', n:c.onpremIdle||0, cls:'owned-idle', label:'idle '}]));
-  document.getElementById('fig-onprem').textContent=`${c.onpremInUse||0} / ${c.onpremTotal||0} in use (on-prem + AWS reserved) · $0 to add work`;
+  // Committed: ONE in-use segment + idle. The per-SKU split (on-prem vs AWS reserved) is
+  // folded into a hover title instead of always-on segments — realism on demand, not clutter.
+  drawBar('supply-onprem', c.onpremTotal||1, [
+    {key:'cm-inuse', n:c.onpremInUse||0, color:'var(--onprem)', label:'in use '},
+    {key:'own-idle', n:c.onpremIdle||0, cls:'owned-idle', label:'idle '},
+  ]);
+  const cmSku=Object.keys(c.committedByType||{}).sort().map(t=>providerOfType(t)+' '+t+' '+c.committedByType[t]).join(' · ');
+  const elOn=document.getElementById('supply-onprem'); if(elOn) elOn.title=cmSku||'';
+  document.getElementById('fig-onprem').textContent=`${c.onpremInUse||0} / ${c.onpremTotal||0} in use · $0`;
 
-  // cloud bar: on-demand SKUs (per provider) + SPOT (its own colour — same SKU,
-  // cheaper, interruptible; BigFleet routes here for interruption-tolerant work) + headroom.
-  const segs=typeSegs(c.cloudByType, 'cl-');
-  const spotSegs=Object.keys(c.spotByType||{}).sort().map(t=>(
-    {key:'sp-'+t, n:c.spotByType[t]||0, color:'var(--spot)', label:'SPOT '+t+' '}));
-  segs.push(...spotSegs);
+  // Cloud: just headroom at rest; the per-SKU + spot split only appears once cloud is
+  // provisioned (i.e. when a scenario bursts onto it).
+  const cost=c.costPerHour||0, spot=c.spotInUse||0, od=c.onDemandInUse||0, inUse=c.cloudInUse||0;
+  const segs=[];
+  if(inUse>0){
+    segs.push(...typeSegs(c.cloudByType, 'cl-'));
+    Object.keys(c.spotByType||{}).sort().forEach(t=>segs.push(
+      {key:'sp-'+t, n:c.spotByType[t]||0, color:'var(--spot)', label:'SPOT '+t+' '}));
+  }
   segs.push({key:'cl-avail', n:c.cloudAvailable||0, cls:'avail', label:'available '});
   drawBar('supply-cloud', c.cloudTotal||1, segs);
-  const cost=c.costPerHour||0;
-  const spot=c.spotInUse||0, od=c.onDemandInUse||0;
-  document.getElementById('fig-cloud').textContent=
-    `${c.cloudInUse||0} / ${c.cloudTotal||0} provisioned · ${od} on-demand + ${spot} spot · $${cost.toFixed(2)}/hr`;
+  document.getElementById('fig-cloud').textContent = inUse>0
+    ? `${inUse} / ${c.cloudTotal||0} · ${od} on-demand + ${spot} spot · $${cost.toFixed(2)}/hr`
+    : `0 / ${c.cloudTotal||0} · $0 until provisioned`;
 
+  // One cost line. The full price + scale disclosure lives in the §9 what's-real panel.
   const el=document.getElementById('cost');
   if(cost>0){
-    const mo=Math.round(cost*730).toLocaleString();
     const split = spot>0
-      ? ` Of the cloud nodes, <b style="color:var(--spot)">${spot} are spot</b> (~$${(c.spotHourly||0).toFixed(2)}/node&middot;hr, interruptible) and ${od} on-demand (~$${(c.nodeHourly||0).toFixed(2)}) — BigFleet put interruption-tolerant work on cheaper spot.`
+      ? ` &mdash; <b style="color:var(--spot)">${spot} spot</b> (~$${(c.spotHourly||0).toFixed(2)}) + ${od} on-demand (~$${(c.nodeHourly||0).toFixed(2)}/node&middot;hr); BigFleet put tolerant work on cheaper spot`
       : '';
-    el.innerHTML=`Metered cloud spend right now: <b class="b">$${cost.toFixed(2)}/hr</b> `+
-      `<span class="proj">(~$${mo}/mo if held at this node count for 730 hrs — illustrative)</span> &mdash; committed capacity adds <span class="z">$0 at the margin</span> (already paid for).`+
-      `<span class="note">${split}</span>`;
+    el.innerHTML=`Metered cloud: <b class="b">$${cost.toFixed(2)}/hr</b> <span class="proj">(illustrative)</span>${split}. Committed adds <span class="z">$0 at the margin</span>.`;
   } else {
-    el.innerHTML=`On-demand (metered) spend right now: <b class="z">$0.00/hr</b> &mdash; all work is on committed capacity, with no on-demand cloud running.`+
-      `<span class="note">Committed capacity is already paid for &mdash; owned on-prem plus AWS reserved instances you pay for whether or not they run &mdash; so it&rsquo;s <b>$0 at the margin</b>, not $0 in total. On-demand cloud is headroom you don&rsquo;t pay for until BigFleet provisions it.</span>`;
+    el.innerHTML=`No on-demand cloud running &mdash; all work is on <b>committed</b> capacity, <span class="z">$0 at the margin</span> (already paid for).`;
   }
-  // Always-on per-node RATE: the scale-invariant number (an enterprise reads the unit
-  // price, not the tiny absolute total). Illustrative constant — deliberately NOT framed
-  // as a market quote or as "multiply by your fleet to see your stakes".
-  document.getElementById('rate').innerHTML=
-    `On-demand cloud priced at <b>$${(c.nodeHourly||0).toFixed(2)}/node&middot;hr</b> &mdash; illustrative author-chosen constant for an 8 vCPU / 32 GiB node, not a live cloud quote.`;
 
-  if(!legendDrawn){ legendDrawn=true;
-    document.getElementById('legend').innerHTML=
-      `<span><span class="dot" style="background:var(--onprem)"></span>committed &middot; on-prem owned</span>`+
-      `<span><span class="dot" style="background:var(--aws)"></span>committed &middot; AWS reserved</span>`+
-      `<span><span class="dot" style="background:var(--onprem-idle)"></span>committed idle ($0 to add work)</span>`+
-      `<span><span class="dot" style="background:var(--gcp)"></span>on-demand GCP</span>`+
-      `<span><span class="dot" style="background:var(--aws)"></span>on-demand AWS</span>`+
-      `<span><span class="dot" style="background:var(--spot)"></span>spot (cheaper · interruptible)</span>`+
-      `<span><span class="dot hatch"></span>cloud available ($0)</span>`;
+  // Compact, adaptive legend — spot only appears once it's actually in use.
+  const hasSpot=spot>0;
+  if(hasSpot!==legSpot){ legSpot=hasSpot;
+    const leg=[`<span><span class="dot" style="background:var(--onprem)"></span>committed in use</span>`,
+               `<span><span class="dot" style="background:var(--onprem-idle)"></span>idle ($0)</span>`,
+               `<span><span class="dot" style="background:var(--gcp)"></span>on-demand</span>`];
+    if(hasSpot) leg.push(`<span><span class="dot" style="background:var(--spot)"></span>spot</span>`);
+    leg.push(`<span><span class="dot hatch"></span>available ($0)</span>`);
+    document.getElementById('legend').innerHTML=leg.join('');
   }
 }
 
