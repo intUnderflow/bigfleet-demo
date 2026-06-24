@@ -74,6 +74,9 @@
   .doc p{margin:0 0 10px;font-size:13.5px;color:var(--ink-2)}
   .doc .small{font-size:12.5px;color:var(--muted)}
   .doc b{color:#fff}
+  .callout{background:linear-gradient(180deg,rgba(37,99,235,.12),transparent);border:1px solid var(--accent);border-left:3px solid var(--accent);border-radius:10px;padding:13px 15px;margin:0 0 22px;font-size:13.5px;line-height:1.55;color:var(--ink-2)}
+  .callout b{color:#fff}
+  .callout .cnote{display:block;margin-top:6px;font-size:11.5px;color:var(--muted)}
   .actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 2px}
   .action{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 13px;
     font-size:13px;font-weight:600;cursor:pointer}
@@ -196,13 +199,13 @@
 
       <section>
         <h2><span class="n">1</span>Not another cluster autoscaler</h2>
-        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reallocating one cluster&rsquo;s freed-up committed capacity to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. Same finite pool you already own, reallocated across clusters.</p>
+        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it — and because each cluster scales itself and new nodes are slow, each one parks its <b>own idle-node buffer</b> for bursts: paid-for headroom standing idle in <i>every</i> cluster. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reallocating one cluster&rsquo;s freed-up committed capacity to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. So you hold <b>one shared buffer for the whole fleet, not one per cluster</b> — the same finite pool you already own, reallocated across clusters. <span class="small">(It still keeps a buffer; just one, shared.)</span></p>
         <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated cloud.</p>
       </section>
 
       <section>
         <h2><span class="n">2</span>Your fleet — three clusters, one finite pool</h2>
-        <p>On the right: three <b>real Kubernetes clusters</b> — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b> — drawing on <b>one shared, finite pool</b> of machines. They&rsquo;re already busy — running batch across the fleet plus a production workload on <b>cluster-a</b> — all packed onto already-paid-for <b>committed</b> capacity at <b>$0/hr</b> (no on-demand cloud running). The pool can&rsquo;t grow past its ceiling, which is exactly why <i>moving</i> capacity between clusters is the whole game.</p>
+        <p>On the right: three <b>real Kubernetes clusters</b> — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b> — drawing on <b>one shared, finite pool</b> of machines. They&rsquo;re already busy — running batch across the fleet plus a production workload on <b>cluster-a</b> — all packed onto already-paid-for <b>committed</b> capacity at <b>$0/hr</b> (no on-demand cloud running). The pool can&rsquo;t grow past its ceiling, which is exactly why <i>moving</i> capacity between clusters is the whole game. That idle slice of committed capacity sitting ready — the <b>&ldquo;Shared buffer&rdquo;</b> on the scoreboard — <i>is</i> the fleet&rsquo;s burst buffer, held <b>once and shared</b>, re-bindable to whichever cluster bursts next through the shard&rsquo;s shared <b>Idle</b> hub (a multi-step move, not instant). A per-cluster autoscaler keeps a buffer like that in <i>every</i> cluster; BigFleet keeps one.</p>
       </section>
 
       <section>
@@ -214,6 +217,8 @@
         </div>
         <p class="small">This cross-cluster move is BigFleet&rsquo;s <b>real</b> control logic running against a simulated cloud. <i>You</i> changed the demand on both sides; BigFleet only reacts — as cluster-A&rsquo;s demand falls it reclaims A&rsquo;s freed nodes into the shard&rsquo;s shared <b>Idle</b> pool, then reuses that committed hardware for cluster-B rather than bursting new cloud. It genuinely <i>reasons about</i> cost (the dollar figures are illustrative constants, not quotes). The wait you watch — cluster-A&rsquo;s production draining, then cluster-B&rsquo;s nodes coming up — is a <b>simulated dwell</b>, not a measured transfer time: BigFleet&rsquo;s real decision, transfer speed simulated.</p>
       </section>
+
+      <div class="callout"><b>The pooled buffer, in one line:</b> a per-cluster autoscaler makes you park idle nodes in <i>every</i> cluster, just in case. BigFleet pools that into <b>one shared committed buffer</b> — idle hardware flows to whichever cluster needs it next through the shard&rsquo;s single Idle hub. One buffer for the fleet, not one per cluster (it still holds a buffer &mdash; just one, shared). <span class="cnote">BigFleet&rsquo;s real decision; transfer speed simulated.</span></div>
 
       <section>
         <h2><span class="n">4</span>A full fleet → preemption across the fleet</h2>
@@ -271,7 +276,7 @@
           <div><span class="s">● Simulated</span>
             <ul><li>The clouds themselves — <b>on-prem / GCP / AWS are labels</b> on kwok-simulated nodes, not real instances (the providers mint kwok fakes, not VMs)</li><li>The <b>$ prices and interruption probabilities</b> (committed $0 marginal, on-demand ~$0.38, spot ~$0.11 / interruption ~30%) — illustrative author-chosen constants, <b>not cloud quotes</b>; the engine really reasons about them, but no <i>measured</i> saving is claimed</li><li><b>Provisioning &amp; drain time</b> — the move is real; the ~15-40s a node takes to come up (and the drain on reclaim) is a configured dwell</li><li><b>Node internals</b> — pod requests/limits, the kube/system reserve (Allocatable &lt; Capacity) and the cni/kube-proxy/node-exporter DaemonSet baseline are illustrative; kwok runs pods at their request, so there are no real CPU/memory <i>usage</i> metrics</li></ul></div>
         </div>
-        <p class="small" style="margin-top:12px"><b>Industry context</b> — third-party, <i>not</i> measured here and <i>not</i> a BigFleet result: independent analysis (Datadog, <i>State of Cloud Costs</i>) finds enterprise Kubernetes fleets average <b>~18% CPU utilisation</b>, <b>2&ndash;5&times; over-provisioning</b>, and an estimated <b>$50k&ndash;$500k per cluster per year</b> of wasted spend. This demo shows the engine <b>reasoning about</b> that kind of trapped capacity at a deliberately small scale — it measures and recovers nothing.</p>
+        <p class="small" style="margin-top:12px"><b>Industry context</b> — third-party, <i>not</i> measured here and <i>not</i> a BigFleet result: independent analysis (Datadog, <i>State of Cloud Costs</i>) finds enterprise Kubernetes fleets average <b>~18% CPU utilisation</b>, <b>2&ndash;5&times; over-provisioning</b>, and an estimated <b>$50k&ndash;$500k per cluster per year</b> of wasted spend. Some of that is structural: when each cluster scales itself and provisioning is slow, each one parks its own idle headroom against its own worst case &mdash; N independent buffers. Pooling is the structural answer &mdash; one shared committed buffer for the whole fleet instead of N, which (by the same statistical-multiplexing principle as any shared pool: more clusters, less-correlated peaks) needs less total idle headroom than the sum of per-cluster buffers. This demo shows the engine <b>reasoning about</b> that trapped capacity &mdash; <b>prefer the shared Idle pool before buying new</b> &mdash; at a deliberately small scale; it measures and recovers nothing, and quotes no percentage.</p>
       </section>
     </aside>
 
@@ -356,7 +361,8 @@ function renderScore(st){
   const cells=[
     {k:'Fleet in use', v:`${live} / ${cap}`, s:'nodes carrying work', cls:'', t:"Nodes across all three clusters carrying work right now, out of the fleet's finite ceiling — one shared pool, no per-cluster limit."},
     {k:'Committed ($0)', v:`${c.onpremInUse||0} / ${c.onpremTotal||0}`, s:'owned + reserved', cls:'green', t:"On-prem bare metal you own, or reserved cloud you've prepaid. Already paid for, so work on it costs ~$0 at the margin — BigFleet fills it first, before any on-demand cloud."},
-    {k:'Cloud', v:`${c.cloudInUse||0}`, s:c.cloudInUse>0?'metered · pay-per-use':'none — $0 headroom', cls:(c.cloudInUse>0?'amber':'zero'), t:"On-demand / spot nodes provisioned right now — metered. Elastic burst, drawn only after committed is full; $0 when none are running."},
+    {k:'Shared buffer', v:`${c.onpremIdle||0}`, s:'idle committed · any cluster', cls:'green', t:"Already-paid-for committed nodes sitting idle right now — the fleet's single shared burst buffer. Idle/freed committed capacity flows to whichever cluster bursts next via the shard's shared Idle hub, so ONE shared buffer replaces a separate idle buffer in every cluster. Pooled, not eliminated."},
+    {k:'Cloud', v:`${c.cloudInUse||0}`, s:c.cloudInUse>0?'metered · pay-per-use':'none — elastic, $0 until used', cls:(c.cloudInUse>0?'amber':'zero'), t:"On-demand / spot nodes provisioned right now — metered. Elastic burst, drawn only after committed is full; $0 when none are running — not a pre-provisioned buffer."},
     {k:'Cloud $/hr', v:`$${cost.toFixed(2)}`, s:cost>0?'illustrative':'$0 at the margin', cls:(cost>0?'amber':'zero'), t:"Illustrative metered cost of the on-demand cloud running now (author-chosen constant, not a quote). Committed capacity is $0 at the margin."},
   ];
   if(pending>0) cells.push({k:'Pending', v:`${pending}`, s:'waiting on capacity', cls:'amber', t:"Pods with no node — higher-priority demand the finite fleet has no room to place."});
@@ -447,7 +453,7 @@ function renderSupply(st){
   if(hasSpot!==legSpot){ legSpot=hasSpot;
     const leg=[`<span><span class="dot" style="background:var(--onprem)"></span>committed &middot; on-prem</span>`,
                `<span><span class="dot" style="background:var(--aws)"></span>committed &middot; AWS reserved</span>`,
-               `<span><span class="dot" style="background:var(--onprem-idle)"></span>idle ($0)</span>`,
+               `<span><span class="dot" style="background:var(--onprem-idle)"></span>idle &middot; shared buffer ($0)</span>`,
                `<span><span class="dot" style="background:var(--gcp)"></span>on-demand</span>`];
     if(hasSpot) leg.push(`<span><span class="dot" style="background:var(--spot)"></span>spot</span>`);
     leg.push(`<span><span class="dot hatch"></span>available ($0)</span>`);
