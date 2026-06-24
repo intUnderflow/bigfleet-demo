@@ -952,6 +952,7 @@ var (
 	scenMu      sync.Mutex
 	scenCancel  context.CancelFunc
 	curScenario string // running teaching scenario (move|saturate|critical), "" when idle — lets the UI disable buttons mid-run
+	scenGen     int    // bumped per launch; the finishing goroutine clears curScenario only if its gen is still current (avoids a name-based ABA)
 	latestMu    sync.Mutex
 	latest      fleetState
 )
@@ -1028,31 +1029,38 @@ func runScenario(ctx context.Context, clusters []cluster, name string) {
 		if len(clusters) < 2 {
 			return
 		}
-		// On the busy start cluster-a already carries its donor demand, so SKIP the cold
-		// load+wait and go straight to the reclaim — this is the fast lead payoff (~one drain
-		// dwell). Cold fallback: if A isn't pre-loaded (e.g. a standalone demo), build the donor
-		// first — but say it's setup, so the build can't be mistaken for the payoff.
+		// Normalize to the move's precondition so the $0 promise holds from ANY prior state — not
+		// just rest. (After saturate/critical the fleet is on BILLED cloud; without this, the move
+		// would narrate "$/hr stays $0" while cloud is still up.) Clear the critical tier
+		// everywhere and clear demand on every cluster EXCEPT the donor (cluster-a), then wait
+		// until the fleet has drained back onto committed (cloud == 0). Only then do we reclaim.
+		for i := range clusters {
+			setTierReplicas(ctx, &clusters[i], "critical", 0)
+			if i != 0 {
+				setTierReplicas(ctx, &clusters[i], "demand", 0)
+			}
+		}
 		ensureMu.Lock()
-		aLoaded := demandLevel[clusters[0].name]["demand"] >= 8
+		aLoaded := demandLevel[clusters[0].name]["demand"] > 0 // donor present (the busy start loads cluster-a)?
 		ensureMu.Unlock()
 		if !aLoaded {
 			pushFeed("▶ Setup: loading cluster-a so it holds a slice of the shared committed pool — the move itself comes next…")
 			setTierReplicas(ctx, &clusters[0], "demand", 16)
-			waitFor(ctx, 75*time.Second, func() bool { return clusterNodesNow(clusters[0].name) >= 18 })
-			if ctx.Err() != nil {
-				return
-			}
+		}
+		if !waitFor(ctx, 90*time.Second, func() bool {
+			return capNow().CloudInUse == 0 && clusterNodesNow(clusters[0].name) >= 18
+		}) {
+			return
 		}
 		// Drop A FIRST and wait for its committed nodes to drain back to the shared Idle pool —
 		// only THEN spike B, so B draws the FREED committed (reuse, $0) instead of bursting fresh
 		// cloud. B's spike is sized within the freed slice, so $/hr stays $0 across the whole move.
 		pushFeed("➡ Dropping cluster-a's production demand — its committed nodes drain back to the shared Idle pool…")
 		setTierReplicas(ctx, &clusters[0], "demand", 0)
-		waitFor(ctx, 60*time.Second, func() bool { return clusterNodesNow(clusters[0].name) <= 16 })
-		if ctx.Err() != nil {
+		if !waitFor(ctx, 60*time.Second, func() bool { return clusterNodesNow(clusters[0].name) <= 16 }) {
 			return
 		}
-		pushFeed("➡ …and now spiking cluster-b: it grows from the committed capacity cluster-a just freed, drawn from the shared Idle pool — reused, NO new cloud spend ($/hr stays $0).")
+		pushFeed("➡ …and now spiking cluster-b: it grows from the committed capacity cluster-a just freed, drawn from the shared Idle pool — that capacity reused, NO new cloud spend ($/hr stays $0).")
 		setTierReplicas(ctx, &clusters[1], "demand", 14)
 	}
 }
@@ -1076,16 +1084,18 @@ func scenarioHandler(clusters []cluster) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		scenCancel = cancel
+		scenGen++
+		gen := scenGen
 		curScenario = req.Name
 		scenMu.Unlock()
-		go func(name string) {
-			runScenario(ctx, clusters, name)
+		go func(g int) {
+			runScenario(ctx, clusters, req.Name)
 			scenMu.Lock()
-			if curScenario == name { // only clear if a newer scenario hasn't taken over
+			if scenGen == g { // clear only if a newer scenario hasn't superseded this run
 				curScenario = ""
 			}
 			scenMu.Unlock()
-		}(req.Name)
+		}(gen)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}
 }

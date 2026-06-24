@@ -205,7 +205,7 @@
 
       <section>
         <h2><span class="n">1</span>Not another cluster autoscaler</h2>
-        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reclaiming idle nodes in one cluster to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. Same hardware you already own, repurposed in place.</p>
+        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reclaiming idle nodes in one cluster to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. Same finite pool you already own, reallocated across clusters.</p>
         <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated cloud.</p>
       </section>
 
@@ -216,12 +216,12 @@
 
       <section>
         <h2><span class="n">3</span>Capacity moves between clusters</h2>
-        <p>Here&rsquo;s the payoff. <b>cluster-B</b> gets a burst of demand its nodes can&rsquo;t hold. A per-cluster autoscaler would <b>buy a brand-new node</b>. Watch BigFleet instead <b>reclaim an idle node from cluster-A and move it to cluster-B</b> — the same machine you already own, repurposed in place: no new spend, no waiting on the cloud.</p>
+        <p>Here&rsquo;s the payoff. <b>cluster-B</b> gets a burst of demand its nodes can&rsquo;t hold. A per-cluster autoscaler would <b>buy a brand-new node</b>. Watch BigFleet instead <b>reclaim cluster-A's idle capacity and hand it to cluster-B</b> — the same committed pool you already own, reallocated across clusters: no new spend, no waiting on the cloud.</p>
         <div class="actions">
           <button class="action" data-scenario="move" onclick="scenario('move')">▶ Move capacity from cluster-A to cluster-B</button>
           <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
         </div>
-        <p class="small">This cross-cluster reallocation is BigFleet&rsquo;s real logic — idle capacity in one cluster serving unschedulable demand in another, both bound to one shard. Only the few seconds a node takes to drain and re-attach is a simulated dwell.</p>
+        <p class="small">This cross-cluster reallocation is BigFleet&rsquo;s real logic — idle capacity in one cluster serving unschedulable demand in another, both bound to one shard. Only the few seconds a node takes to drain on reclaim, and a replacement to come up in the other cluster, is a simulated dwell.</p>
       </section>
 
       <section>
@@ -249,8 +249,8 @@
         <h2><span class="n">6</span>Drive it yourself: provision &amp; reclaim</h2>
         <p>The table-stakes scale-out/in, shown so you can watch the cost ordering up close. Add a burst of production demand and BigFleet packs the pending requests onto fresh nodes — <b>committed first</b> (still $0), then <b>bursting onto on-demand cloud</b> ($ ticks up). Drop it and it <b>sheds the billed cloud nodes first</b>, keeping paid-for committed warm.</p>
         <div class="actions">
-          <button class="action" onclick="setDemand('cluster-c',24)">▶ Add demand to cluster-C</button>
-          <button class="action ghost" onclick="setDemand('cluster-c',0)">↺ Drop it</button>
+          <button class="action" data-mutates onclick="setDemand('cluster-c',24)">▶ Add demand to cluster-C</button>
+          <button class="action ghost" data-mutates onclick="setDemand('cluster-c',0)">↺ Drop it</button>
         </div>
         <p class="small">This is what any autoscaler does — it&rsquo;s the fleet-level moves in §3&ndash;§4 that are BigFleet&rsquo;s alone. Each node bin-packs several pods (open a dashboard to see); the provisioning time is a simulated dwell.</p>
       </section>
@@ -360,7 +360,7 @@ function renderSharedPool(st){
         `<span class="sp-sub">owned capacity (on-prem + reserved) that <b>any</b> cluster can draw from &mdash; $0 to use</span></div>`+
       `<div class="sp-row"><span class="sp-n">${idle}</span><span class="sp-unit">idle node${idle===1?'':'s'} &middot; available to any cluster now</span>`+
         `<div class="sp-tiles">${tiles}</div></div>`+
-      `<div class="sp-note">When a cluster frees a node it returns here; another cluster reuses it &mdash; reallocated in place, <b>no new cloud, no new spend</b>. That cross-cluster reuse is the thing a per-cluster autoscaler can&rsquo;t do.</div>`+
+      `<div class="sp-note">When a cluster frees a node, that committed capacity returns to this pool; another cluster draws on it &mdash; reallocated across the fleet, <b>no new cloud, no new spend</b>. That cross-cluster reuse is the thing a per-cluster autoscaler can&rsquo;t do.</div>`+
     `</div>`;
 }
 
@@ -368,7 +368,9 @@ function renderSharedPool(st){
 // other triggers so a mis-click can't silently abandon it. Reset stays live (to cancel).
 function syncScenarioButtons(st){
   const running=!!(st&&st.scenario);
-  document.querySelectorAll('button[data-scenario]').forEach(b=>{ b.disabled=running; });
+  // disable the scenario triggers AND the manual demand controls (§6 + the per-cluster bumps),
+  // since a mid-run poke could break the move's drain-then-spike $0 ordering. Reset stays live.
+  document.querySelectorAll('button[data-scenario],button[data-mutates]').forEach(b=>{ b.disabled=running; });
 }
 
 // renderScore: the at-a-glance fleet scoreboard — total nodes vs the finite 120-cap,
@@ -479,16 +481,17 @@ function renderSupply(st){
 // (per-panel signature) so a stable cluster's provisioning pulse runs smoothly.
 function renderFleet(st){
   const host=document.getElementById('fleet');
+  const anyCrit=(st.clusters||[]).some(x=>(x.critical||0)>0); // label batch "displaced" ONLY when critical is contending (real preemption), not ordinary provisioning lag
   (st.clusters||[]).forEach(c=>{
     let panel=document.getElementById('cl-'+c.name);
     if(!panel){ panel=document.createElement('div'); panel.className='panel cluster'; panel.id='cl-'+c.name; host.appendChild(panel); }
-    const s=JSON.stringify([c.nodesByCloud,c.podsPending,c.podsRunning,c.nodes,c.demand,c.critical,c.baseline,c.batchPending,c.dashboard]);
+    const s=JSON.stringify([c.nodesByCloud,c.podsPending,c.podsRunning,c.nodes,c.demand,c.critical,c.baseline,c.batchPending,anyCrit,c.dashboard]);
     if(panel.dataset.sig===s) return; panel.dataset.sig=s;
 
     let tiles='';
     clouds.forEach(cl=>{ const n=(c.nodesByCloud||{})[cl]||0;
       tiles+=Array.from({length:n}).map(()=>`<div class="tile" style="background:${CLOUD_COLORS[cl]}"></div>`).join(''); });
-    const bd=Math.max(0,c.batchPending||0), op=Math.max(0,(c.podsPending||0)-bd);
+    const bd=anyCrit?Math.max(0,c.batchPending||0):0, op=Math.max(0,(c.podsPending||0)-bd);
     tiles+=Array.from({length:Math.min(bd,10)}).map(()=>`<div class="tile displaced" title="low-priority batch displaced to free the finite fleet for higher-priority work — waiting"></div>`).join('');
     tiles+=Array.from({length:Math.min(op,10)}).map(()=>`<div class="tile prov" title="pods pending — BigFleet is provisioning capacity"></div>`).join('');
 
@@ -500,11 +503,11 @@ function renderFleet(st){
     panel.innerHTML=
       `<h3>${c.name}</h3><div class="mix">${mix}</div>
        <div class="tiles">${tiles}</div>
-       <div class="stat"><span>nodes <b>${c.nodes}</b></span><span>running <b>${c.podsRunning}</b></span><span>pending <b>${c.podsPending}</b></span>${c.critical>0?`<span>critical <b style="color:var(--bad)">${c.critical}</b></span>`:''}${c.batchPending>0?`<span>batch displaced <b style="color:var(--bad)">${c.batchPending}</b></span>`:''}</div>
+       <div class="stat"><span>nodes <b>${c.nodes}</b></span><span>running <b>${c.podsRunning}</b></span><span>pending <b>${c.podsPending}</b></span>${c.critical>0?`<span>critical <b style="color:var(--bad)">${c.critical}</b></span>`:''}${(anyCrit&&c.batchPending>0)?`<span>batch displaced <b style="color:var(--bad)">${c.batchPending}</b></span>`:''}</div>
        <div class="crow"><div class="demand-ctl" id="demand-${c.name}">
-         <button class="sm" onclick="bump('${c.name}',-5)">−</button>
+         <button class="sm" data-mutates onclick="bump('${c.name}',-5)">−</button>
          <span class="lvl">demand ${c.demand}</span>
-         <button class="sm" onclick="bump('${c.name}',5)">+</button></div></div>
+         <button class="sm" data-mutates onclick="bump('${c.name}',5)">+</button></div></div>
        ${dash}`;
   });
 }

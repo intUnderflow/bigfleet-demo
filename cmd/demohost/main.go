@@ -830,7 +830,10 @@ func waitForSettle(portBase int, max time.Duration) {
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
 		pokeHeartbeat(portBase)
-		if n, ok := backendPending(portBase); ok && n == 0 {
+		// Converged = the busy baseline has actually come up (nodes > 0) AND nothing is pending.
+		// Requiring nodes>0 avoids a false-early "0 pending" in the window after seedBusyFleet
+		// patches replica counts but before the ReplicaSet controller has created any pods.
+		if p, nodes, ok := backendPending(portBase); ok && p == 0 && nodes > 0 {
 			if stable++; stable >= 2 {
 				return
 			}
@@ -840,32 +843,33 @@ func waitForSettle(portBase int, max time.Duration) {
 	}
 }
 
-// backendPending returns total pending + still-provisioning nodes across the session's fleet
-// (0 = converged), via the backend's /api/state snapshot.
-func backendPending(portBase int) (int, bool) {
+// backendPending returns (pending+provisioning, ready+provisioning nodes) across the session's
+// fleet via the backend's /api/state snapshot. pending==0 && nodes>0 means converged.
+func backendPending(portBase int) (pending, nodes int, ok bool) {
 	cl := &http.Client{Timeout: 2 * time.Second}
 	resp, err := cl.Get(fmt.Sprintf("http://127.0.0.1:%d/api/state", portBase))
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, false
+		return 0, 0, false
 	}
 	var st struct {
 		Clusters []struct {
+			Nodes        int `json:"nodes"`
 			PodsPending  int `json:"podsPending"`
 			Provisioning int `json:"provisioning"`
 		} `json:"clusters"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&st) != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	n := 0
 	for _, c := range st.Clusters {
-		n += c.PodsPending + c.Provisioning
+		pending += c.PodsPending + c.Provisioning
+		nodes += c.Nodes
 	}
-	return n, true
+	return pending, nodes, true
 }
 
 func boolEnv(b bool) string {
