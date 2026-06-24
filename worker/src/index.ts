@@ -9,9 +9,10 @@
  *
  *   - Direct hit to bigfleet-demo.lucy.sh (strong intent — typed/bookmarked the demo):
  *     we serve a small gate page that runs v3 invisibly, and ONLY if the score is too
- *     low shows a reCAPTCHA v2 "I'm not a robot" checkbox. Passing either (with capacity)
- *     earns a live session — so a real human on a VPN/privacy browser with a poor v3
- *     score can still prove themselves, while a bot hitting the URL meets a real challenge.
+ *     low shows a reCAPTCHA v2 checkbox. Passing either earns a live session; and if the
+ *     fleet is FULL, a passed visitor joins a FIFO queue (with a live position and a tour
+ *     link) instead of being turned away — they're dropped straight in when a slot frees,
+ *     and lose their place if they stop polling for ~2 minutes.
  *
  * Once assigned, the visitor (keyed by IP) is reverse-proxied to their session until it
  * ends; ending sends them back to the front door rather than silently minting another slot.
@@ -22,7 +23,7 @@
  *   DEMOHOST_KEY        (secret) coordinator key -> X-Demo-Key to each runner's /v1/*.
  *   RECAPTCHA_SECRET    (secret) reCAPTCHA v3 secret -> Google siteverify.
  *   RECAPTCHA_V2_SECRET (secret) reCAPTCHA v2 (checkbox) secret -> Google siteverify.
- *   SESSIONS            (KV)     ip -> {runner,id,expiresAt}; auto-expires at session end.
+ *   SESSIONS            (KV)     ip:<ip> -> session assignment; q:<ip> -> queue ticket.
  */
 
 interface Env {
@@ -41,6 +42,8 @@ interface Assignment {
 }
 
 const KV_PREFIX = "ip:";
+const QUEUE_PREFIX = "q:"; // q:<ip> -> {joinedAt}; metadata.joinedAt orders the FIFO line
+const QUEUE_TTL = 130; // seconds: a queued visitor who stops polling for ~2min loses their place
 const HOME_URL = "https://bigfleet.lucy.sh/"; // front door — re-enter the demo through the gate
 const TOUR_URL = "https://bigfleet.lucy.sh/demo"; // the static, always-available terminal tour
 const DEMO_URL = "https://bigfleet-demo.lucy.sh/"; // clean demo URL (no one-time token)
@@ -60,9 +63,13 @@ export default {
     const ip = visitorIP(request);
     const kvKey = KV_PREFIX + ip;
 
-    // The direct-hit gate page calls this with a v3 (then, if needed, v2) token.
+    // The direct-hit gate page calls these: /_gate with a v3 (then, if needed, v2) token,
+    // and /_queue to hold/advance a place in line while the fleet is full.
     if (url.pathname === "/_gate" && request.method === "POST") {
       return handleGate(request, env, ip, kvKey);
+    }
+    if (url.pathname === "/_queue" && request.method === "POST") {
+      return handleQueue(env, ip, kvKey);
     }
 
     // Homepage "Demo" button (casual intent) arrives with a one-time ?rc=<v3-token>. Resolve
@@ -101,10 +108,10 @@ export default {
 };
 
 /**
- * handleGate verifies a token from the direct-hit gate page and, if it clears, assigns a
- * session. v3 below the bar asks the page to fall back to the v2 checkbox; a passed v2 (or a
- * good v3) earns a slot if any runner has room. Idempotent: if this IP already holds a
- * session it just says "go", so a retry/reload never double-assigns.
+ * handleGate verifies a token from the direct-hit gate page and assigns a session. v3 below
+ * the bar asks the page to fall back to the v2 checkbox; a passed v2 (or a good v3) earns a
+ * slot if any runner has room, and otherwise joins the FIFO queue. Idempotent: if this IP
+ * already holds a session it just says "go", so a retry/reload never double-assigns.
  */
 async function handleGate(
   request: Request,
@@ -134,9 +141,69 @@ async function handleGate(
   }
 
   const fresh = await assignNew(env);
-  if (!fresh) return json({ full: true });
-  await writeAssignment(env, kvKey, fresh);
-  return json({ ok: true });
+  if (fresh) {
+    await writeAssignment(env, kvKey, fresh);
+    await queueLeave(env, ip);
+    return json({ ok: true });
+  }
+  // Passed reCAPTCHA but the fleet is full -> join the FIFO queue (direct-nav visitors only;
+  // the homepage ?rc path instead falls through to the tour).
+  const joinedAt = await queueTouch(env, ip);
+  return json({ queued: true, position: await queuePosition(env, joinedAt) });
+}
+
+/**
+ * handleQueue is polled by a waiting gate page (~every 20s). It refreshes the visitor's
+ * ticket TTL (so stopping for ~2min drops them), reports their live FIFO position, and — when
+ * they reach the front and a slot frees — assigns it and tells the page to go.
+ */
+async function handleQueue(env: Env, ip: string, kvKey: string): Promise<Response> {
+  if (await readAssignment(env, kvKey)) {
+    await queueLeave(env, ip);
+    return json({ ready: true });
+  }
+  const joinedAt = await queueTouch(env, ip);
+  const position = await queuePosition(env, joinedAt);
+  if (position === 1) {
+    const fresh = await assignNew(env);
+    if (fresh) {
+      await writeAssignment(env, kvKey, fresh);
+      await queueLeave(env, ip);
+      return json({ ready: true });
+    }
+  }
+  return json({ queued: true, position });
+}
+
+/** Upsert my queue ticket, preserving my original joinedAt so polling never resets my place. */
+async function queueTouch(env: Env, ip: string): Promise<number> {
+  const k = QUEUE_PREFIX + ip;
+  const existing = (await env.SESSIONS.get(k, { type: "json" })) as { joinedAt: number } | null;
+  const joinedAt = existing && typeof existing.joinedAt === "number" ? existing.joinedAt : Date.now();
+  await env.SESSIONS.put(k, JSON.stringify({ joinedAt }), {
+    expirationTtl: QUEUE_TTL,
+    metadata: { joinedAt },
+  });
+  return joinedAt;
+}
+
+/** 1-based FIFO position: (non-expired tickets that joined before me) + 1. */
+async function queuePosition(env: Env, joinedAt: number): Promise<number> {
+  let ahead = 0;
+  let cursor: string | undefined;
+  do {
+    const res: any = await env.SESSIONS.list({ prefix: QUEUE_PREFIX, cursor });
+    for (const k of res.keys) {
+      const ja = k.metadata && (k.metadata as { joinedAt?: number }).joinedAt;
+      if (typeof ja === "number" && ja < joinedAt) ahead++;
+    }
+    cursor = res.list_complete ? undefined : res.cursor;
+  } while (cursor);
+  return ahead + 1;
+}
+
+async function queueLeave(env: Env, ip: string): Promise<void> {
+  await env.SESSIONS.delete(QUEUE_PREFIX + ip);
 }
 
 function minScore(env: Env): number {
@@ -288,8 +355,8 @@ function html(body: string, status = 200): Response {
 /**
  * gatePage — served on a direct hit to bigfleet-demo.lucy.sh. Runs reCAPTCHA v3 invisibly;
  * a good score POSTs straight through /_gate into a session, a low score reveals the v2
- * checkbox. No capacity -> a friendly pointer to the tour. The inline script avoids template
- * literals so it nests cleanly inside this one.
+ * checkbox. If the fleet is full it shows a live FIFO queue position (polling /_queue) plus a
+ * tour link. The inline script avoids template literals so it nests inside this one.
  */
 function gatePage(): string {
   return `<!doctype html><html lang="en"><head>
@@ -301,11 +368,14 @@ function gatePage(): string {
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
   background:#17181c;color:#edeef3;font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 @media(prefers-color-scheme:light){body{background:#fff;color:#17181c}}
-.card{max-width:440px;text-align:center;padding:32px}
+.card{max-width:460px;text-align:center;padding:32px}
 .logo{display:inline-flex;gap:9px;align-items:center;font-weight:600;font-size:18px;color:#2563eb;margin-bottom:18px}
 h1{font-size:19px;margin:0 0 8px}
 p{color:#888c96;margin:0 0 16px}
 a{color:#2563eb}
+.small{font-size:13px}
+.pos{font-size:40px;font-weight:700;color:#edeef3;margin:6px 0 2px;font-variant-numeric:tabular-nums}
+@media(prefers-color-scheme:light){.pos{color:#17181c}}
 .spin{width:30px;height:30px;border:3px solid #353841;border-top-color:#2563eb;border-radius:50%;
   margin:6px auto 18px;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
 #v2box{display:inline-block;margin:6px 0 4px}
@@ -316,17 +386,17 @@ a{color:#2563eb}
 <div id="checking"><div class="spin"></div><h1>Getting your live demo ready…</h1><p>One quick automated check.</p></div>
 <div id="challenge" class="hide"><h1>Quick check</h1><p>Confirm you're human to get your own live session.</p><div id="v2box"></div><p id="cherr" class="err hide">That didn't go through — try again.</p></div>
 <div id="starting" class="hide"><div class="spin"></div><h1>Starting your live demo…</h1><p>Standing up real Kubernetes clusters and a BigFleet shard just for you.</p></div>
-<div id="busy" class="hide"><h1>All live sessions are busy</h1><p>Every session is in use right now — each frees up within the hour. In the meantime, <a href="${TOUR_URL}">take the guided terminal tour</a>.</p></div>
+<div id="queued" class="hide"><h1>You're in line</h1><p>The live demo is at capacity right now. Keep this tab open — you'll be dropped straight in when a spot frees.</p><div class="pos">#<span id="qpos">—</span></div><p class="small">your place in line</p><p class="small">Don't want to wait? <a href="${TOUR_URL}">Take the guided terminal tour →</a></p></div>
 </div>
 <script>
 (function(){
   var V3=${JSON.stringify(V3_SITE_KEY)}, V2=${JSON.stringify(V2_SITE_KEY)};
-  var v2id=null, tries=0;
-  function show(id){ ["checking","challenge","starting","busy"].forEach(function(x){
+  var v2id=null, tries=0, qpoll=null;
+  function show(id){ ["checking","challenge","starting","queued"].forEach(function(x){
     document.getElementById(x).classList[x===id?"remove":"add"]("hide"); }); }
   function handle(res){
     if(res&&res.ok){ show("starting"); location.href="/"; return; }
-    if(res&&res.full){ show("busy"); return; }
+    if(res&&res.queued){ queue(res.position); return; }
     if(res&&res.needV2){ challenge(); return; }
     document.getElementById("cherr").classList.remove("hide");
     if(v2id!==null){ try{ grecaptcha.reset(v2id); }catch(e){} }
@@ -334,14 +404,25 @@ a{color:#2563eb}
   function post(mode,token){
     fetch("/_gate",{method:"POST",headers:{"content-type":"application/json"},
       body:JSON.stringify({mode:mode,token:token})})
-      .then(function(r){return r.json();}).then(handle).catch(function(){ show("busy"); });
+      .then(function(r){return r.json();}).then(handle).catch(function(){ queue(null); });
+  }
+  function queue(pos){
+    show("queued");
+    if(pos){ document.getElementById("qpos").textContent=pos; }
+    if(!qpoll){ qpoll=setInterval(pollQueue,20000); }
+  }
+  function pollQueue(){
+    fetch("/_queue",{method:"POST"}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.ready){ if(qpoll)clearInterval(qpoll); show("starting"); location.href="/"; return; }
+      if(res&&res.queued){ document.getElementById("qpos").textContent=res.position; }
+    }).catch(function(){});
   }
   function challenge(){
     show("challenge");
     if(v2id===null){
       try{ v2id=grecaptcha.render("v2box",{sitekey:V2,callback:function(t){
         document.getElementById("cherr").classList.add("hide"); post("v2",t); }}); }
-      catch(e){ /* api not ready yet — the waitReady loop will retry */ v2id=null; setTimeout(challenge,300); }
+      catch(e){ v2id=null; setTimeout(challenge,300); }
     }
   }
   function startV3(){
