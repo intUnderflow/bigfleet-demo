@@ -116,15 +116,19 @@
   .dot.hatch{background:repeating-linear-gradient(45deg,var(--hair),var(--hair) 3px,var(--track) 3px,var(--track) 6px)}
 
   .fleet{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:13px}
-  .cluster h3{margin:0 0 2px;font-size:15px}
+  .cluster h3{margin:0 0 2px;font-size:15px;display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  .cluster h3 .nodes-badge{font-family:var(--mono);font-size:12px;font-weight:400;color:var(--muted);white-space:nowrap}
+  .cluster h3 .nodes-badge b{font-size:15px;color:var(--ink)}
+  .crit-lvl{font-family:var(--mono);font-size:12px;color:var(--bad);white-space:nowrap}
   .cluster .mix{font-size:11.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-top:2px}
   .cluster .mix .chip{white-space:nowrap}
   .tiles{display:flex;flex-wrap:wrap;gap:3px;margin:10px 0;min-height:40px;align-content:flex-start}
   .tile{width:11px;height:11px;border-radius:2px;background:var(--real);transition:background .3s}
   .tile.prov{background:var(--prov);animation:pulse 1.6s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:.9}50%{opacity:.32}}
-  .stat{display:flex;gap:12px;font-size:12px;color:var(--muted);margin-bottom:10px}
+  .stat{display:flex;gap:12px;font-size:12px;color:var(--muted);margin:9px 0 2px;flex-wrap:wrap}
   .stat b{color:var(--ink)}
+  .stat .disp b{color:var(--bad)}
   /* low-priority batch the scheduler displaced to place critical work (§4 preemption victim) */
   .tile.displaced{background:var(--idle);opacity:.5;animation:none;outline:1px dashed var(--bad);outline-offset:-1px}
   .crow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -458,7 +462,7 @@ function renderFleet(st){
   (st.clusters||[]).forEach(c=>{
     let panel=document.getElementById('cl-'+c.name);
     if(!panel){ panel=document.createElement('div'); panel.className='panel cluster'; panel.id='cl-'+c.name; host.appendChild(panel); }
-    const s=JSON.stringify([c.nodesByCloud,c.podsPending,c.podsRunning,c.nodes,c.demand,c.critical,c.baseline,c.batchPending,anyCrit,c.dashboard]);
+    const s=JSON.stringify([c.nodesByCloud,c.podsPending,c.nodes,c.demand,c.critical,c.batchPending,anyCrit,c.dashboard]);
     if(panel.dataset.sig===s) return; panel.dataset.sig=s;
 
     let tiles='';
@@ -473,14 +477,23 @@ function renderFleet(st){
       || '<span class="chip" style="color:var(--muted)">no capacity yet</span>';
     const dash=c.dashboard?`<button class="sm dash-btn" onclick="window.open('${c.dashboard}','_blank')">⎈ Open Kubernetes dashboard</button>`:'';
 
+    // Three distinct unit types, kept visually separate: NODES (capacity, the headline) →
+    // DEMAND/critical (the levels you set) → PENDING/displaced PODS (the pressure signal,
+    // only shown under load). 'running' pod count dropped — it dwarfed the capacity story.
+    const pend=Math.max(0,c.podsPending||0);
+    const disp=(anyCrit&&(c.batchPending||0)>0)?c.batchPending:0;
+    const pressure=(pend>0||disp>0)
+      ? `<div class="stat">${pend>0?`<span><b>${pend}</b> pod${pend===1?'':'s'} pending</span>`:''}${disp>0?`<span class="disp" title="low-priority batch pods the scheduler preempted to place critical work — waiting for capacity"><b>${disp}</b> batch pods displaced</span>`:''}</div>`
+      : '';
     panel.innerHTML=
-      `<h3>${c.name}</h3><div class="mix">${mix}</div>
+      `<h3><span>${c.name}</span><span class="nodes-badge"><b>${c.nodes}</b> node${c.nodes===1?'':'s'}</span></h3>
+       <div class="mix">${mix}</div>
        <div class="tiles">${tiles}</div>
-       <div class="stat"><span>nodes <b>${c.nodes}</b></span><span>running <b>${c.podsRunning}</b></span><span>pending <b>${c.podsPending}</b></span>${c.critical>0?`<span>critical <b style="color:var(--bad)">${c.critical}</b></span>`:''}${(anyCrit&&c.batchPending>0)?`<span>batch displaced <b style="color:var(--bad)">${c.batchPending}</b></span>`:''}</div>
        <div class="crow"><div class="demand-ctl" id="demand-${c.name}">
          <button class="sm" data-mutates onclick="bump('${c.name}',-5)">−</button>
          <span class="lvl">demand ${c.demand}</span>
-         <button class="sm" data-mutates onclick="bump('${c.name}',5)">+</button></div></div>
+         <button class="sm" data-mutates onclick="bump('${c.name}',5)">+</button></div>${c.critical>0?`<span class="crit-lvl">critical ${c.critical}</span>`:''}</div>
+       ${pressure}
        ${dash}`;
   });
 }
