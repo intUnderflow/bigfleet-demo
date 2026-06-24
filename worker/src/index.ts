@@ -553,13 +553,13 @@ async function sampleStats(env: Env): Promise<void> {
 async function capacityStatsOf(
   env: Env,
   runner: string,
-): Promise<{ busy: number; free: number; warm: number }> {
+): Promise<{ busy: number; free: number; warm: number; max: number; ok: boolean }> {
   try {
     const r = await fetch(runner + "/v1/capacity", {
       headers: { "X-Demo-Key": env.DEMOHOST_KEY },
       cf: { cacheTtl: 0 },
     } as RequestInit);
-    if (!r.ok) return { busy: 0, free: 0, warm: 0 };
+    if (!r.ok) return { busy: 0, free: 0, warm: 0, max: 0, ok: false };
     const v = (await r.json()) as {
       maxSessions?: number;
       visitorSessions?: number;
@@ -567,10 +567,20 @@ async function capacityStatsOf(
     };
     const max = Math.max(0, v.maxSessions || 0);
     const busy = Math.max(0, v.visitorSessions || 0);
-    return { busy, free: Math.max(0, max - busy), warm: Math.max(0, v.warmReady || 0) };
+    return { busy, free: Math.max(0, max - busy), warm: Math.max(0, v.warmReady || 0), max, ok: true };
   } catch {
-    return { busy: 0, free: 0, warm: 0 };
+    return { busy: 0, free: 0, warm: 0, max: 0, ok: false };
   }
+}
+
+// Stable public label for a runner — "R1"/"R2" from the rN-… hostname (falls back to position).
+// Deliberately hides the underlying hardware; the /stats page only ever shows R1/R2.
+function runnerLabel(url: string, i: number): string {
+  try {
+    const m = new URL(url).hostname.match(/^r(\d+)\b/i);
+    if (m) return "R" + m[1];
+  } catch {}
+  return "R" + (i + 1);
 }
 
 async function queueDepth(env: Env): Promise<number> {
@@ -631,8 +641,9 @@ async function statsPage(env: Env): Promise<Response> {
   const freeNow = caps.reduce((a, c) => a + c.free, 0);
   const busyNow = caps.reduce((a, c) => a + c.busy, 0);
   const warmNow = caps.reduce((a, c) => a + c.warm, 0);
+  const perRunner = runners.map((r, i) => ({ label: runnerLabel(r, i), ...caps[i] }));
   const qNow = await queueDepth(env);
-  return html(renderStats({ outcomes, sess, capTs, sessTs, funnel, freeNow, busyNow, warmNow, qNow, configured: !!env.CF_API_TOKEN }));
+  return html(renderStats({ outcomes, sess, capTs, sessTs, funnel, freeNow, busyNow, warmNow, qNow, perRunner, configured: !!env.CF_API_TOKEN }));
 }
 
 function spark(series: { values: number[]; color: string }[], w = 300, h = 48): string {
@@ -661,6 +672,7 @@ function renderStats(d: {
   busyNow: number;
   warmNow: number;
   qNow: number;
+  perRunner: { label: string; busy: number; free: number; warm: number; max: number; ok: boolean }[];
   configured: boolean;
 }): string {
   const num = (x: any) => (typeof x === "number" ? x : parseFloat(x) || 0);
@@ -731,6 +743,20 @@ function renderStats(d: {
     )
     .join("");
 
+  // Per-runner live load (R1/R2 — hardware is deliberately not named).
+  const runnerCard = (rr: typeof d.perRunner[number]) => {
+    if (!rr.ok)
+      return `<div class="card"><div class="v" style="color:#888c96">offline</div><div class="l">${rr.label}</div></div>`;
+    const load = rr.max > 0 ? pct(rr.busy, rr.max) : 0;
+    return `<div class="card"><div class="v">${n(rr.busy)}<span style="color:#6b7280;font-size:16px;font-weight:600"> / ${n(rr.max)}</span></div>` +
+      `<div class="l">${rr.label} &mdash; in use</div>` +
+      `<div class="s">${n(rr.warm)} warm ready &middot; ${load}% load</div>` +
+      `<div class="bar" title="${load}% load"><i style="width:${load}%;background:#2563eb"></i><i style="width:${100 - load}%;background:#3a8a52"></i></div></div>`;
+  };
+  const runnersBlock = d.perRunner.length
+    ? `<h2>By runner</h2><div class="grid">${d.perRunner.map(runnerCard).join("")}</div>`
+    : "";
+
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -783,6 +809,8 @@ ${banner}
   ${card("waiting in queue", n(d.qNow))}
 </div>
 <div class="bar" title="in use vs free"><i style="width:${slots > 0 ? pct(d.busyNow, slots) : 0}%;background:#2563eb"></i><i style="width:${slots > 0 ? 100 - pct(d.busyNow, slots) : 100}%;background:#3a8a52"></i></div>
+
+${runnersBlock}
 
 <h2>Homepage &quot;Demo&quot; button</h2>
 <div class="grid">
