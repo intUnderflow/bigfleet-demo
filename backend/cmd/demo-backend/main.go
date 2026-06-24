@@ -303,7 +303,7 @@ func main() {
 	sessionPath := flag.String("session", "run/session.json", "path to the session descriptor")
 	addr := flag.String("addr", ":8090", "listen address")
 	uiDir := flag.String("ui", "ui/dist", "static UI dir (falls back to ui/)")
-	baseline := flag.Int("baseline", 8, "baseline (pre-loaded, low-priority batch) demand level per cluster — packed onto committed at rest (cloud $0)")
+	baseline := flag.Int("baseline", 6, "baseline (pre-loaded, low-priority batch) demand level per cluster — packed onto committed at rest, sized with margin under the committed ceiling so the busy fleet never spills to billed cloud (stays $0)")
 	donorDemand := flag.Int("donor-demand", 16, "standing production demand on cluster-a at rest (node-equivalents) — the busy-but-stable workload the cross-cluster 'move' reclaims; sized to stay within committed ($0)")
 	fleetSize := flag.Int("fleet-size", 120, "total machines in the finite fleet (= owned on-prem + cloud quota)")
 	onpremSize := flag.Int("onprem-size", 48, "owned on-prem bare-metal pool size (match the shard's --seed-machines)")
