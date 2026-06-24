@@ -55,17 +55,24 @@ gh secret set DEMOHOST_KEY --repo intUnderflow/bigfleet-demo < secrets/demohost.
 ```sh
 # on a Docker- + Go-capable box, from the repo root
 ./bin/demohost serve \
-  --addr :8080 \
-  --demo-memory-mb 16384 \      # total RAM reserved to demos — admission never exceeds this
-  --session-memory-mb 2048 \    # reserved per session (measured ~1.9 GB/session, see below)
-  --max-sessions 8 \            # hard backstop on concurrency
+  --addr 127.0.0.1:8080 \       # loopback by default; the per-runner tunnel reaches it here
+  --demo-memory-mb 12000 \      # total RAM reserved to demos — admission never exceeds this
+  --session-memory-mb 2048 \    # reserved per session (measured ~1.6 GB/session, see below)
+  --max-sessions 5 \            # hard backstop on concurrency
+  --warm-pool 2 \               # keep this many pre-built, pre-settled sessions ready (instant dive-in)
+  --dashboards \                # per-cluster Kubernetes dashboards (3 light containers/session)
   --session-ttl 1h \            # hard lifetime
   --idle-timeout 5m \           # reaped this long after the tab stops heart-beating
-  --advertise-host demo.example.com   # host part of returned session URLs
+  --advertise-host r1-bigfleet-demo.lucy.sh   # host part of returned session URLs
 ```
 
 `serve` builds the shared demo binaries once (`hack/demo-build.sh`), then listens. On
-Ctrl-C / SIGTERM it reaps every live session before exiting (no leaked clusters).
+Ctrl-C / SIGTERM it reaps every live session before exiting (no leaked clusters). The two
+production runners (a Mac Mini and an M1, at `r1-`/`r2-bigfleet-demo.lucy.sh`) run this and
+their `cloudflared` tunnels under **`launchd`** (`RunAtLoad` + `KeepAlive`), so they survive
+crashes and reboots. NB `demo-build.sh` rebuilds the *session* binaries but **not `demohost`
+itself** — a change under `cmd/demohost` (e.g. a new flag) needs a `go build -o bin/demohost
+./cmd/demohost` on the runner before the restart.
 
 Drive it with the client subcommands (same key resolution):
 
@@ -119,13 +126,30 @@ Admission lets a new session start only if **both** hold:
 A single session measured **~1.85 GB**: ~1.4 GB across its 15 kwok containers (etcd /
 apiserver / controller-manager / scheduler / kwok-controller × 3 clusters) + ~0.47 GB of
 host processes (shard, 3 providers, 3×{operator, UPC, node-creator}, backend). Early in a
-session's life it's lower (~1.1 GB) and it climbs as nodes/pods seed. The default
-`--session-memory-mb 2048` leaves headroom over the measured peak. **Re-measure on the prod
-host** (native Linux cgroups differ from Docker Desktop's VM) and set the reservation from
-that — `demohost capacity` gives you the measured number to calibrate against.
+session's life it's lower (~1.1 GB) and it climbs as nodes/pods seed. On the production
+runners (Apple Silicon, Docker Desktop) a session measures **~1.56 GB** + ~36 MiB for the three
+dashboards — comfortably under the `--session-memory-mb 2048` reservation, so `--demo-memory-mb
+12000` admits 5. **Re-measure on your own host** and set the reservation from that —
+`demohost capacity` gives you the measured number to calibrate against.
 
-To stay lean, hosted sessions run with the per-cluster Kubernetes dashboards **off** by
-default (they'd add 3 containers/session); pass `--dashboards` to re-enable them.
+### Dashboards
+
+The official per-cluster Kubernetes Dashboard is **enabled in production** (`--dashboards`) —
+it's the credibility anchor: a viewer opens it and sees the real nodes the stock scheduler
+placed pods on. It's cheap — **~12 MiB per dashboard container, ~36 MiB/session** — and the
+backend reverse-proxies each one at a relative `/dash/a|b|c/`, so it rides the same coordinator
+proxy with no extra ports. The dashboard container gets its kubeconfig via `docker cp` rather
+than a host bind-mount, so it starts even when Docker file-sharing is locked to the kwok dir
+for security. The flag defaults **off** for a bare `demohost` run; the standalone local demo
+turns dashboards on by default.
+
+### Warm pool
+
+`--warm-pool N` keeps `N` sessions **pre-built and baseline-settled**, so a visitor is handed
+a ready one in a fraction of a second instead of waiting ~10–30s for a stack to come up and
+settle. Pooled sessions are heartbeated (never idle-reaped while pooled) and recycled past
+`--warm-max-age` (30m) so a hand-out always has plenty of time left; a ready pooled session
+counts toward the coordinator-visible headroom. Production runs `--warm-pool 2`.
 
 ## Reaching sessions: the `/s/{id}` proxy + the coordinator
 
@@ -136,9 +160,13 @@ port, exposes every session — no raw per-session ports on the internet. (`/v1/
 key-gated; `/s/*` is the visitor surface.)
 
 The public front door is the **Cloudflare Worker coordinator** (`worker/`, served at
-`bigfleet-demo.lucy.sh`): it holds the key, maps each visitor IP → a session on a runner with
-capacity, proxies them in, and re-assigns when a session ends. See
-[`worker/README.md`](../worker/README.md) for the architecture and deploy steps.
+`bigfleet-demo.lucy.sh`): it holds the key, **gates each new visitor behind reCAPTCHA**, maps a
+passing visitor's IP → a session on a runner with capacity, and proxies them in. When a session
+ends the runner serves `410` and the Worker sends the visitor back to the front door to
+re-enter through the gate — it does **not** silently re-assign (that would let one IP camp a
+slot); and when the whole fleet is full, a human-verified direct visitor joins a FIFO queue
+rather than hitting a dead end. See [`worker/README.md`](../worker/README.md) for the
+architecture and deploy steps.
 
 `demohost create` still returns the direct `http://<advertise-host>:<portBase>` URL, handy
 for local/manual use; the coordinator uses the `/s/{id}` path instead.

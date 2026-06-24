@@ -16,8 +16,9 @@ fleet — per-cluster nodes by tier + the shard's real inventory/action counters
 tour is the demo guide on the docs site (`bigfleet.lucy.sh/demo`).
 
 Prereqs: `go`, `curl`, and **Docker** (kwokctl runs each cluster's kube-apiserver in a container).
-`kwokctl` + `kwok` are auto-downloaded to `/tmp/kwokbin` on first run. The sibling `../bigfleet` and
-`../bigfleet-providers` checkouts must be present (pinned in `ci/sibling-pins.env`).
+`kwokctl` + `kwok` are auto-downloaded on first run. Nothing else to clone — the BigFleet engine and
+providerkit come from the published `bigfleet` / `bigfleet-providers` modules (pinned in `go.mod`), which
+`go build` fetches on demand.
 
 ## What's running (the demo stack)
 
@@ -39,5 +40,6 @@ Prereqs: `go`, `curl`, and **Docker** (kwokctl runs each cluster's kube-apiserve
 **Real:** BigFleet's engine, its Phase 1/2/3 decisions, the shard actions + inventory, the CRDs.
 **Simulated:** the cloud, the nodes (kwok fakes), prices/interruption odds, and **transfer speed**.
 
-State (`run/`) and built binaries (`bin/`) are gitignored. The path from this single-host demo to the full
-public one (per-session orchestration, the dispatcher fleet) is in `docs/research/build-plan.md`.
+State (`run/`) and built binaries (`bin/`) are gitignored. To run this stack many times over on one
+machine behind a public front door, see [`docs/operating-the-host.md`](../docs/operating-the-host.md)
+(the `demohost` daemon) and [`worker/README.md`](../worker/README.md) (the coordinator).

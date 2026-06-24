@@ -47,20 +47,27 @@ The full guided walkthrough is the **[demo tour on the docs site](https://bigfle
 `demohost` runs many isolated sessions on one machine — the program that powers a public,
 shared deployment. Every session is the full stack above on its own port block; each runs for
 **up to an hour** and is reaped a few minutes after its tab closes. Creation is gated by a
-secret key (the **central coordinator** model), and the host **reserves a fixed memory budget
-to demos and refuses anything that would exceed it**.
+secret key (the **central coordinator** model); the host **reserves a fixed memory budget to
+demos and refuses anything that would exceed it**; and it keeps a small **warm pool** of
+pre-built, pre-settled sessions so a visitor dives straight in instead of waiting for a stack
+to come up.
 
 ```sh
 export DEMOHOST_KEY=$(cat secrets/demohost.key)   # generated locally; mirrored to the GH Actions secret
-./bin/demohost serve --demo-memory-mb 16384 --session-memory-mb 2048 --max-sessions 8
-./bin/demohost create        # → a session URL, valid for an hour
+./bin/demohost serve --demo-memory-mb 12000 --session-memory-mb 2048 \
+  --max-sessions 5 --warm-pool 2 --dashboards
 ./bin/demohost capacity      # machine RAM / budget / measured usage / headroom
 ```
 
-The public front door is a **Cloudflare Worker** (`worker/`, at `bigfleet-demo.lucy.sh`) that
-assigns each visitor IP to a session on a runner with capacity and re-assigns when a session
-ends. Full operator guide: **[docs/operating-the-host.md](docs/operating-the-host.md)**;
-coordinator: **[worker/README.md](worker/README.md)**.
+The public front door is a **Cloudflare Worker** (`worker/`, at `bigfleet-demo.lucy.sh`). It
+gates every new visitor behind **reCAPTCHA** (an invisible v3 score, with a v2 checkbox as a
+fallback for a direct visit whose score is low), assigns a passing visitor — by IP — to a
+runner with capacity, and reverse-proxies them in. When the fleet is full a human-verified
+direct visitor joins a **first-in-first-out queue** with a live position (and is dropped in
+when a slot frees) rather than hitting a dead end; anyone who doesn't make the cut is offered
+the [guided tour](https://bigfleet.lucy.sh/demo) instead. Full operator guide:
+**[docs/operating-the-host.md](docs/operating-the-host.md)**; coordinator:
+**[worker/README.md](worker/README.md)**.
 
 ## How it's built
 
@@ -68,7 +75,9 @@ coordinator: **[worker/README.md](worker/README.md)**.
 node-creator ← one BigFleet shard ← three fake `providerkit` providers (`providers/fakecloud`, one
 multiplexed gRPC server) that mint kwok nodes. The demo control plane (`backend/cmd/demo-backend`) is the
 only surface a viewer touches — it streams derived fleet state and mints validated workloads server-side;
-the apiserver is never exposed.
+the apiserver is never exposed. Each cluster's **real Kubernetes Dashboard** is reachable too (the backend
+reverse-proxies it at `/dash/a|b|c/`, no extra ports), so a viewer can open it and see the actual nodes the
+stock scheduler placed pods on — proof the clusters are genuine, not a mock.
 
 The demo depends one-way on the published [bigfleet](https://github.com/intUnderflow/bigfleet) and
 [bigfleet-providers](https://github.com/intUnderflow/bigfleet-providers) modules — nothing here is imported
