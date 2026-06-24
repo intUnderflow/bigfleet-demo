@@ -49,7 +49,7 @@ for c in "${CLUSTERS[@]}"; do
   # --warmup: mint the initial baseline nodes with NO dwell so a fresh session settles to its
   # at-rest state in seconds (the dwell still applies after, for the interactive moments).
   start "$c-node-creator.log" "$BIN/node-creator" --kubeconfig="$RUN/$c.kubeconfig" \
-    --warmup "${NODE_WARMUP:-45s}"
+    --warmup "${NODE_WARMUP:-60s}"
 done
 
 if [ "$DASHBOARDS" = "1" ]; then

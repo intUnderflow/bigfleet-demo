@@ -58,6 +58,7 @@ type clusterState struct {
 	Provisioning int            `json:"provisioning"` // UpcomingNodes not yet Ready
 	PodsRunning  int            `json:"podsRunning"`
 	PodsPending  int            `json:"podsPending"`
+	BatchPending int            `json:"batchPending"` // pending low-priority BATCH pods — the preemption victim under scarcity (§4)
 	Demand       int            `json:"demand"`    // standard demand-tier pods (user-controlled)
 	Critical     int            `json:"critical"`  // critical demand-tier pods (section 8)
 	Baseline     int            `json:"baseline"`  // baseline-tier pods (pre-loaded)
@@ -71,6 +72,7 @@ type fleetState struct {
 	Clouds       []string       `json:"clouds"`       // stable display order of the providers in the fleet
 	FleetSize    int            `json:"fleetSize"`    // total machines in the finite fleet (hard cap = owned + cloud quota)
 	Capacity     capacity       `json:"capacity"`     // the two-tier owned/cloud split + illustrative cost
+	Scenario     string         `json:"scenario"`     // running teaching scenario (move|saturate|critical), "" if none
 	Feed         []string       `json:"feed"`
 	TS           string         `json:"ts"`
 }
@@ -301,7 +303,8 @@ func main() {
 	sessionPath := flag.String("session", "run/session.json", "path to the session descriptor")
 	addr := flag.String("addr", ":8090", "listen address")
 	uiDir := flag.String("ui", "ui/dist", "static UI dir (falls back to ui/)")
-	baseline := flag.Int("baseline", 8, "baseline (pre-loaded, low-priority batch) demand level per cluster — sized so at rest the fleet sits on committed only (cloud $0) with clear headroom")
+	baseline := flag.Int("baseline", 8, "baseline (pre-loaded, low-priority batch) demand level per cluster — packed onto committed at rest (cloud $0)")
+	donorDemand := flag.Int("donor-demand", 16, "standing production demand on cluster-a at rest (node-equivalents) — the busy-but-stable workload the cross-cluster 'move' reclaims; sized to stay within committed ($0)")
 	fleetSize := flag.Int("fleet-size", 120, "total machines in the finite fleet (= owned on-prem + cloud quota)")
 	onpremSize := flag.Int("onprem-size", 48, "owned on-prem bare-metal pool size (match the shard's --seed-machines)")
 	cloudSize := flag.Int("cloud-size", 72, "elastic cloud quota ceiling (match the shard's --seed-speculative)")
@@ -363,8 +366,8 @@ func main() {
 		clusters = append(clusters, cluster{name: w.Name, c: c, dashboard: dashURL})
 	}
 
-	fmt.Printf("demo-backend: pre-loading %d baseline pods per cluster\n", *baseline)
-	seedBaseline(clusters, *baseline)
+	fmt.Printf("demo-backend: opening BUSY — baseline %d/cluster + cluster-a donor demand %d, all on committed ($0)\n", *baseline, *donorDemand)
+	seedBusyFleet(clusters, *baseline, *donorDemand)
 
 	hub := newHub()
 	go pollLoop(sess, clusters, hub, *fleetSize, capConfig{onprem: *onpremSize, cloud: *cloudSize, nodeHourly: *cloudHourly, spotHourly: *spotHourly})
@@ -374,8 +377,17 @@ func main() {
 	mux.HandleFunc("/api/session", sessionHandler(clock))
 	mux.HandleFunc("/api/heartbeat", heartbeatHandler(clock))
 	mux.HandleFunc("/api/demand", limited(demandHandler(clusters)))
-	mux.HandleFunc("/api/reset", limited(resetHandler(clusters, *baseline)))
+	mux.HandleFunc("/api/reset", limited(resetHandler(clusters, *baseline, *donorDemand)))
 	mux.HandleFunc("/api/scenario", limited(scenarioHandler(clusters)))
+	// snapshot of the latest fleet state (same data as the SSE) — used by demohost to poll a
+	// warming pooled session until its busy baseline has converged before handing it to a visitor.
+	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		latestMu.Lock()
+		st := latest
+		latestMu.Unlock()
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(st)
+	})
 	for _, dm := range dashMounts {
 		mux.Handle(dm.prefix+"/", dashHandler(dm.prefix, dm.target, dm.token)) // ServeMux redirects /dash/a -> /dash/a/
 	}
@@ -467,6 +479,9 @@ func pollLoop(sess session, clusters []cluster, hub *hub, fleetSize int, cfg cap
 						cs.PodsRunning++
 					} else {
 						cs.PodsPending++
+						if p.Labels["tier"] == "baseline" {
+							cs.BatchPending++ // displaced batch waiting for capacity — the §4 preemption victim
+						}
 					}
 					if p.Labels["tier"] == "baseline" {
 						cs.Baseline++ // pod count (internal); demand/critical show LEVEL, set below
@@ -501,6 +516,9 @@ func pollLoop(sess session, clusters []cluster, hub *hub, fleetSize int, cfg cap
 		// same nodes on on-demand. Committed = $0 marginal.
 		cp.CostPerHour = float64(onDemandReady)*cfg.nodeHourly + float64(spotReady)*cfg.spotHourly
 		st.Capacity = cp
+		scenMu.Lock()
+		st.Scenario = curScenario
+		scenMu.Unlock()
 		setLatest(st)
 		synthesizeFeed(&st)
 		hub.broadcast(st)
@@ -531,7 +549,7 @@ func synthesizeFeed(st *fleetState) {
 			prevNodes[cs.Name] = cs.Nodes
 		}
 		// Seed a friendly at-rest line so the feed isn't blank/frozen on arrival.
-		feed = []string{st.TS + "  Fleet at rest — committed capacity is serving the baseline workloads; on-demand cloud is $0.00/hr. Press a button on the left to move capacity."}
+		feed = []string{st.TS + "  Fleet running on committed capacity — batch baseline across the fleet plus cluster-a's production workload; on-demand cloud is $0.00/hr. Press a button on the left to move capacity across the fleet."}
 		st.Feed = append([]string(nil), feed...)
 		return
 	}
@@ -870,12 +888,21 @@ func setTierReplicas(ctx context.Context, cl *cluster, tier string, level int) {
 	}
 }
 
-func seedBaseline(clusters []cluster, n int) {
+// seedBusyFleet puts the fleet in its at-rest BUSY state: a batch baseline on every cluster
+// PLUS a standing production workload on the donor (cluster-a, index 0) — all packed onto
+// COMMITTED capacity ($0 marginal, cloud untouched). So the demo OPENS on a busy-but-stable
+// fleet and the cross-cluster 'move' has a real donor to reclaim from with no self-inflicted
+// scale-up. Everything stays within committed, so CostPerHour is $0 and "committed only / $0/hr" holds.
+func seedBusyFleet(clusters []cluster, baseline, donorDemand int) {
 	ctx := context.Background()
 	for i := range clusters {
-		setTierReplicas(ctx, &clusters[i], "baseline", n)
-		setTierReplicas(ctx, &clusters[i], "demand", 0)
+		setTierReplicas(ctx, &clusters[i], "baseline", baseline)
 		setTierReplicas(ctx, &clusters[i], "critical", 0)
+		d := 0
+		if i == 0 { // cluster-a carries the standing production workload (the move's donor)
+			d = donorDemand
+		}
+		setTierReplicas(ctx, &clusters[i], "demand", d)
 	}
 }
 
@@ -904,16 +931,12 @@ func demandHandler(clusters []cluster) http.HandlerFunc {
 	}
 }
 
-// POST /api/reset -> clear all demand, restore baseline everywhere.
-func resetHandler(clusters []cluster, baseline int) http.HandlerFunc {
+// POST /api/reset -> back to the at-rest BUSY fleet (baseline batch + cluster-a donor demand,
+// all on committed / $0), not an empty fleet — so "Reset" returns to the loaded starting state.
+func resetHandler(clusters []cluster, baseline, donorDemand int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cancelScenario()
-		ctx := context.Background()
-		for i := range clusters {
-			setTierReplicas(ctx, &clusters[i], "demand", 0)
-			setTierReplicas(ctx, &clusters[i], "critical", 0)
-			setTierReplicas(ctx, &clusters[i], "baseline", baseline)
-		}
+		seedBusyFleet(clusters, baseline, donorDemand)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}
 }
@@ -926,10 +949,11 @@ func resetHandler(clusters []cluster, baseline int) http.HandlerFunc {
 // cancels it. Narration is honest: the scenario states what it's about to do; the viewer
 // watches the real cluster cards + supply bars react.
 var (
-	scenMu     sync.Mutex
-	scenCancel context.CancelFunc
-	latestMu   sync.Mutex
-	latest     fleetState
+	scenMu      sync.Mutex
+	scenCancel  context.CancelFunc
+	curScenario string // running teaching scenario (move|saturate|critical), "" when idle — lets the UI disable buttons mid-run
+	latestMu    sync.Mutex
+	latest      fleetState
 )
 
 func setLatest(st fleetState) { latestMu.Lock(); latest = st; latestMu.Unlock() }
@@ -961,6 +985,7 @@ func cancelScenario() {
 		scenCancel()
 		scenCancel = nil
 	}
+	curScenario = ""
 	scenMu.Unlock()
 }
 
@@ -1003,23 +1028,32 @@ func runScenario(ctx context.Context, clusters []cluster, name string) {
 		if len(clusters) < 2 {
 			return
 		}
-		pushFeed("▶ Loading cluster-a heavily so it holds a big slice of the shared committed pool…")
-		setTierReplicas(ctx, &clusters[0], "demand", 32)
-		waitFor(ctx, 75*time.Second, func() bool { return clusterNodesNow(clusters[0].name) >= 24 })
-		if ctx.Err() != nil {
-			return
+		// On the busy start cluster-a already carries its donor demand, so SKIP the cold
+		// load+wait and go straight to the reclaim — this is the fast lead payoff (~one drain
+		// dwell). Cold fallback: if A isn't pre-loaded (e.g. a standalone demo), build the donor
+		// first — but say it's setup, so the build can't be mistaken for the payoff.
+		ensureMu.Lock()
+		aLoaded := demandLevel[clusters[0].name]["demand"] >= 8
+		ensureMu.Unlock()
+		if !aLoaded {
+			pushFeed("▶ Setup: loading cluster-a so it holds a slice of the shared committed pool — the move itself comes next…")
+			setTierReplicas(ctx, &clusters[0], "demand", 16)
+			waitFor(ctx, 75*time.Second, func() bool { return clusterNodesNow(clusters[0].name) >= 18 })
+			if ctx.Err() != nil {
+				return
+			}
 		}
-		// Drop A FIRST and wait for its capacity to drain back to the shared Idle hub —
-		// only THEN spike B, so B draws the FREED committed capacity (reuse, $0) instead of
-		// bursting fresh cloud. (Doing both at once let B grow via cloud before A released.)
-		pushFeed("➡ Dropping cluster-a's demand — its committed capacity drains back to the shared Idle hub…")
+		// Drop A FIRST and wait for its committed nodes to drain back to the shared Idle pool —
+		// only THEN spike B, so B draws the FREED committed (reuse, $0) instead of bursting fresh
+		// cloud. B's spike is sized within the freed slice, so $/hr stays $0 across the whole move.
+		pushFeed("➡ Dropping cluster-a's production demand — its committed nodes drain back to the shared Idle pool…")
 		setTierReplicas(ctx, &clusters[0], "demand", 0)
 		waitFor(ctx, 60*time.Second, func() bool { return clusterNodesNow(clusters[0].name) <= 16 })
 		if ctx.Err() != nil {
 			return
 		}
-		pushFeed("➡ …and now spiking cluster-b: it grows from the capacity cluster-a just freed, drawn from the shared Idle hub — reused, NO new cloud spend.")
-		setTierReplicas(ctx, &clusters[1], "demand", 30)
+		pushFeed("➡ …and now spiking cluster-b: it grows from the committed capacity cluster-a just freed, drawn from the shared Idle pool — reused, NO new cloud spend ($/hr stays $0).")
+		setTierReplicas(ctx, &clusters[1], "demand", 14)
 	}
 }
 
@@ -1042,8 +1076,16 @@ func scenarioHandler(clusters []cluster) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		scenCancel = cancel
+		curScenario = req.Name
 		scenMu.Unlock()
-		go runScenario(ctx, clusters, req.Name)
+		go func(name string) {
+			runScenario(ctx, clusters, name)
+			scenMu.Lock()
+			if curScenario == name { // only clear if a newer scenario hasn't taken over
+				curScenario = ""
+			}
+			scenMu.Unlock()
+		}(req.Name)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}
 }

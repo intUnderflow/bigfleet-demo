@@ -464,7 +464,7 @@ func (h *host) createPooled() {
 	s.lastSeenOK = time.Now()
 	h.mu.Unlock()
 
-	time.Sleep(h.cfg.warmSettle) // let the baseline converge (poolTick heartbeats it meanwhile)
+	waitForSettle(s.PortBase, h.cfg.warmSettle) // poll until the busy baseline converges (capped at warmSettle)
 
 	h.mu.Lock()
 	if s.State == "warming" { // not reaped/claimed mid-settle
@@ -819,6 +819,53 @@ func backendExpired(portBase int) (bool, bool) {
 		return false, true
 	}
 	return st.Expired, true
+}
+
+// waitForSettle polls a warming session's backend until its fleet has no pending or still-
+// provisioning nodes for two consecutive checks (the busy baseline has fully converged), or
+// `max` elapses — so a heavier busy baseline isn't handed to a visitor mid-provision.
+func waitForSettle(portBase int, max time.Duration) {
+	deadline := time.Now().Add(max)
+	stable := 0
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		pokeHeartbeat(portBase)
+		if n, ok := backendPending(portBase); ok && n == 0 {
+			if stable++; stable >= 2 {
+				return
+			}
+		} else {
+			stable = 0
+		}
+	}
+}
+
+// backendPending returns total pending + still-provisioning nodes across the session's fleet
+// (0 = converged), via the backend's /api/state snapshot.
+func backendPending(portBase int) (int, bool) {
+	cl := &http.Client{Timeout: 2 * time.Second}
+	resp, err := cl.Get(fmt.Sprintf("http://127.0.0.1:%d/api/state", portBase))
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var st struct {
+		Clusters []struct {
+			PodsPending  int `json:"podsPending"`
+			Provisioning int `json:"provisioning"`
+		} `json:"clusters"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&st) != nil {
+		return 0, false
+	}
+	n := 0
+	for _, c := range st.Clusters {
+		n += c.PodsPending + c.Provisioning
+	}
+	return n, true
 }
 
 func boolEnv(b bool) string {

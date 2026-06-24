@@ -699,8 +699,10 @@ function renderStats(d: {
     return `<div class="frow"><div class="fl">&sect;${nn} ${label}</div><div class="fbar"><i style="width:${w}%"></i></div><div class="fn">${n(c)}${landed > 0 ? " &middot; " + w + "%" : ""}</div></div>`;
   }).join("");
   const engage = [
-    ["act:demand", "drove demand"],
-    ["act:scenario", "ran a scenario"],
+    ["act:scenario:move", "ran the cross-cluster MOVE (lead payoff)"],
+    ["act:scenario:critical", "ran fleet preemption"],
+    ["act:scenario:saturate", "saturated the fleet"],
+    ["act:demand", "drove demand (§6)"],
     ["act:dashboard", "opened a dashboard"],
   ]
     .map(([k, label]) =>
