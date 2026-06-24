@@ -95,6 +95,9 @@ type config struct {
 	ttl          time.Duration
 	idle         time.Duration
 	dashboards   bool
+	warmPool     int
+	warmSettle   time.Duration
+	warmMaxAge   time.Duration
 }
 
 // ── session + host ─────────────────────────────────────────────────────────────
@@ -106,7 +109,8 @@ type session struct {
 	CreatedAt  time.Time `json:"createdAt"`
 	ExpiresAt  time.Time `json:"expiresAt"` // hard cap = CreatedAt + ttl
 	ReservedMB int       `json:"reservedMB"`
-	State      string    `json:"state"` // starting | running | reaping
+	State      string    `json:"state"`  // starting | warming | pooled | running | reaping
+	Pooled     bool      `json:"pooled"` // a pre-warmed, not-yet-assigned session
 
 	lastSeenOK time.Time // last successful backend poll (reaper grace clock)
 }
@@ -121,6 +125,7 @@ type host struct {
 	machineMB    int
 	memActualMB  int // last measured actual demo RSS (0 = unknown/not yet sampled)
 	memSampledAt time.Time
+	poolInFlight int // pooled sessions being created but not yet in the map (admission accounting)
 }
 
 func newHost(cfg config) *host {
@@ -149,7 +154,7 @@ func (h *host) activeCountLocked() int {
 // the measured-actual check is a secondary safety net so a session running heavier than its
 // reservation still can't push real usage past the budget.
 func (h *host) admitLocked() error {
-	n := h.activeCountLocked()
+	n := h.activeCountLocked() + h.poolInFlight // count pooled sessions being created too
 	if n >= h.cfg.maxSessions {
 		return fmt.Errorf("at max sessions (%d)", h.cfg.maxSessions)
 	}
@@ -313,6 +318,141 @@ func (h *host) sampleMemory() {
 	_ = bases
 }
 
+// ── warm pool ──────────────────────────────────────────────────────────────────
+//
+// To make dive-in instant, keep --warm-pool sessions pre-created AND baseline-settled, ready
+// to hand out the moment a visitor arrives. Pooled sessions are heartbeated so they don't
+// idle-reap, and recycled past --warm-max-age so a hand-out always has plenty of session time
+// left. No backend change: a handed-out session simply keeps the clock it started with.
+
+// takePooledLocked claims a ready pooled session for a visitor, or nil. Caller holds h.mu.
+func (h *host) takePooledLocked(now time.Time) *session {
+	for _, s := range h.sessions {
+		if s.Pooled && s.State == "pooled" {
+			s.Pooled = false
+			s.State = "running"
+			s.lastSeenOK = now
+			return s
+		}
+	}
+	return nil
+}
+
+func (h *host) poolLoop(ctx context.Context) {
+	t := time.NewTicker(8 * time.Second)
+	defer t.Stop()
+	h.poolTick() // fill immediately at startup
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.poolTick()
+		}
+	}
+}
+
+func (h *host) poolTick() {
+	now := time.Now()
+	h.mu.Lock()
+	var recycle []*session
+	var keepAlive []int
+	pooled := 0
+	for _, s := range h.sessions {
+		if !s.Pooled || s.State == "reaping" {
+			continue
+		}
+		if now.Sub(s.CreatedAt) > h.cfg.warmMaxAge {
+			s.State = "reaping"
+			recycle = append(recycle, s)
+			continue
+		}
+		pooled++
+		if s.State == "warming" || s.State == "pooled" {
+			keepAlive = append(keepAlive, s.PortBase)
+		}
+	}
+	launch := 0
+	for pooled+h.poolInFlight+launch < h.cfg.warmPool && h.admitLocked() == nil {
+		h.poolInFlight++ // reserve the slot for admission accounting
+		launch++
+	}
+	h.mu.Unlock()
+
+	for _, p := range keepAlive {
+		pokeHeartbeat(p) // keep pooled/warming sessions from idle-reaping
+	}
+	for _, s := range recycle {
+		fmt.Printf("demohost: recycling stale pooled session %s\n", s.ID)
+		h.reap(s)
+		h.mu.Lock()
+		h.removeLocked(s.ID)
+		h.mu.Unlock()
+	}
+	for i := 0; i < launch; i++ {
+		go h.createPooled()
+	}
+}
+
+func (h *host) createPooled() {
+	now := time.Now()
+	h.mu.Lock()
+	base, err := h.allocBaseLocked()
+	if err != nil {
+		h.poolInFlight--
+		h.mu.Unlock()
+		return
+	}
+	id := genID(h.sessions)
+	s := &session{
+		ID: id, PortBase: base,
+		URL:        fmt.Sprintf("http://%s:%d", h.cfg.advertise, base),
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(h.cfg.ttl),
+		ReservedMB: h.cfg.sessionMB,
+		State:      "starting", Pooled: true,
+		lastSeenOK: now,
+	}
+	h.sessions[id] = s
+	h.usedBases[base] = true
+	h.poolInFlight-- // now counted via the map, no longer in-flight
+	h.mu.Unlock()
+
+	fmt.Printf("demohost: warming pooled session %s on port %d\n", id, base)
+	if err := h.spawn(s); err != nil {
+		fmt.Printf("demohost: pooled session %s failed to warm: %v\n", id, err)
+		h.reap(s)
+		h.mu.Lock()
+		h.removeLocked(id)
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Lock()
+	if s.State == "starting" {
+		s.State = "warming"
+	}
+	s.lastSeenOK = time.Now()
+	h.mu.Unlock()
+
+	time.Sleep(h.cfg.warmSettle) // let the baseline converge (poolTick heartbeats it meanwhile)
+
+	h.mu.Lock()
+	if s.State == "warming" { // not reaped/claimed mid-settle
+		s.State = "pooled"
+		fmt.Printf("demohost: pooled session %s ready\n", id)
+	}
+	h.mu.Unlock()
+}
+
+// pokeHeartbeat resets a session backend's idle clock (used to keep pooled sessions alive).
+func pokeHeartbeat(portBase int) {
+	cl := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/api/heartbeat", portBase), nil)
+	if resp, err := cl.Do(req); err == nil {
+		resp.Body.Close()
+	}
+}
+
 // ── HTTP ───────────────────────────────────────────────────────────────────────
 
 func (h *host) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -339,6 +479,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 func (h *host) createSession(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	h.mu.Lock()
+	// Warm pool: if a pre-warmed, baseline-settled session is ready, hand it out instantly.
+	if s := h.takePooledLocked(now); s != nil {
+		h.mu.Unlock()
+		fmt.Printf("demohost: handed pooled session %s to a visitor (instant)\n", s.ID)
+		writeJSON(w, http.StatusCreated, s)
+		return
+	}
 	if err := h.admitLocked(); err != nil {
 		h.mu.Unlock()
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -420,6 +567,7 @@ type capacityView struct {
 	ReservedMB       int     `json:"reservedMB"`
 	MeasuredActualMB int     `json:"measuredActualMB"`
 	MeasuredAgeSec   int     `json:"measuredAgeSec"`
+	WarmReady        int     `json:"warmReady"` // pre-warmed sessions ready for instant hand-out
 	HeadroomSessions int     `json:"headroomSessions"`
 	BudgetUsedPct    float64 `json:"budgetUsedPct"`
 }
@@ -445,6 +593,15 @@ func (h *host) capacityView() capacityView {
 	if headroom < 0 {
 		headroom = 0
 	}
+	// A ready pooled session serves a visitor by instant hand-out (no new slot needed), so it
+	// adds to the visitor-servable headroom the coordinator routes on.
+	warmReady := 0
+	for _, s := range h.sessions {
+		if s.Pooled && s.State == "pooled" {
+			warmReady++
+		}
+	}
+	headroom += warmReady
 	age := 0
 	if !h.memSampledAt.IsZero() {
 		age = int(time.Since(h.memSampledAt).Seconds())
@@ -452,7 +609,7 @@ func (h *host) capacityView() capacityView {
 	return capacityView{
 		MachineTotalMB: h.machineMB, DemoBudgetMB: h.cfg.demoBudgetMB, PerSessionMB: h.cfg.sessionMB,
 		RunningSessions: n, MaxSessions: h.cfg.maxSessions, ReservedMB: reserved,
-		MeasuredActualMB: h.memActualMB, MeasuredAgeSec: age, HeadroomSessions: headroom,
+		MeasuredActualMB: h.memActualMB, MeasuredAgeSec: age, WarmReady: warmReady, HeadroomSessions: headroom,
 		BudgetUsedPct: pct(reserved, h.cfg.demoBudgetMB),
 	}
 }
@@ -534,6 +691,10 @@ func serveMain(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go h.reaperLoop(ctx)
+	if c.warmPool > 0 {
+		fmt.Printf("demohost: warm pool = %d (settle %s, recycle >%s)\n", c.warmPool, c.warmSettle, c.warmMaxAge)
+		go h.poolLoop(ctx)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/sessions", h.auth(h.createSession))

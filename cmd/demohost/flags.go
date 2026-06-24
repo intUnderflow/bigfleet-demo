@@ -29,6 +29,9 @@ func parseServeFlags(args []string) (config, string, bool) {
 	fs.DurationVar(&c.ttl, "session-ttl", time.Hour, "hard session lifetime")
 	fs.DurationVar(&c.idle, "idle-timeout", 5*time.Minute, "reap a session this long after its tab stops heart-beating")
 	fs.BoolVar(&c.dashboards, "dashboards", false, "run per-cluster k8s dashboards in each session (heavier)")
+	fs.IntVar(&c.warmPool, "warm-pool", 0, "pre-warm this many baseline-settled sessions for instant hand-out to visitors (0 disables)")
+	fs.DurationVar(&c.warmSettle, "warm-settle", 35*time.Second, "after a pooled session's stack is up, wait this long for its baseline to settle before marking it ready")
+	fs.DurationVar(&c.warmMaxAge, "warm-max-age", 30*time.Minute, "recycle a pooled session older than this so hand-outs always have plenty of session time left")
 	_ = fs.Parse(args)
 	if abs, err := filepath.Abs(c.repo); err == nil {
 		c.repo = abs
