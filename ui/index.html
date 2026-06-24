@@ -94,6 +94,7 @@
   .pool{margin-bottom:13px}
   .pool-hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;margin-bottom:5px}
   .pool-name{font-weight:600;color:var(--ink)}
+  .pool-name[title],.scoreboard .sb[title]{cursor:help}
   .pool-sub{color:var(--muted);font-weight:400;font-size:11px;margin-left:6px}
   .pool-fig{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
   .supply{display:flex;height:28px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--track)}
@@ -282,14 +283,14 @@
         <div class="panel">
           <div class="pool">
             <div class="pool-hd">
-              <span class="pool-name"><span class="dot" style="background:var(--onprem)"></span>Committed<span class="pool-sub">already paid · $0 to add work</span></span>
+              <span class="pool-name" title="On-prem bare metal you own, or reserved cloud you&rsquo;ve prepaid. Already paid for, so work on it costs ~$0 at the margin — BigFleet fills it first, before any on-demand cloud."><span class="dot" style="background:var(--onprem)"></span>Committed<span class="pool-sub">already paid · $0 to add work</span></span>
               <span class="pool-fig" id="fig-onprem"></span>
             </div>
             <div class="supply" id="supply-onprem"></div>
           </div>
           <div class="pool">
             <div class="pool-hd">
-              <span class="pool-name"><span class="dot" style="background:var(--gcp)"></span>Cloud<span class="pool-sub">pay-per-use · $0 until provisioned</span></span>
+              <span class="pool-name" title="On-demand or spot capacity, metered by the hour — $0 until BigFleet provisions it. Elastic burst, drawn only after committed is full — not a pre-provisioned buffer."><span class="dot" style="background:var(--gcp)"></span>Cloud<span class="pool-sub">pay-per-use · $0 until provisioned</span></span>
               <span class="pool-fig" id="fig-cloud"></span>
             </div>
             <div class="supply" id="supply-cloud"></div>
@@ -353,14 +354,14 @@ function renderScore(st){
   // Four at-a-glance stats; On-demand+Spot fold into one Cloud cell (the bar shows the split
   // once cloud is in use). Pending only surfaces when work is actually waiting on capacity.
   const cells=[
-    {k:'Fleet in use', v:`${live} / ${cap}`, s:'nodes carrying work', cls:''},
-    {k:'Committed ($0)', v:`${c.onpremInUse||0} / ${c.onpremTotal||0}`, s:'owned + reserved', cls:'green'},
-    {k:'Cloud', v:`${c.cloudInUse||0}`, s:c.cloudInUse>0?'metered · pay-per-use':'none — $0 headroom', cls:(c.cloudInUse>0?'amber':'zero')},
-    {k:'Cloud $/hr', v:`$${cost.toFixed(2)}`, s:cost>0?'illustrative':'$0 at the margin', cls:(cost>0?'amber':'zero')},
+    {k:'Fleet in use', v:`${live} / ${cap}`, s:'nodes carrying work', cls:'', t:"Nodes across all three clusters carrying work right now, out of the fleet's finite ceiling — one shared pool, no per-cluster limit."},
+    {k:'Committed ($0)', v:`${c.onpremInUse||0} / ${c.onpremTotal||0}`, s:'owned + reserved', cls:'green', t:"On-prem bare metal you own, or reserved cloud you've prepaid. Already paid for, so work on it costs ~$0 at the margin — BigFleet fills it first, before any on-demand cloud."},
+    {k:'Cloud', v:`${c.cloudInUse||0}`, s:c.cloudInUse>0?'metered · pay-per-use':'none — $0 headroom', cls:(c.cloudInUse>0?'amber':'zero'), t:"On-demand / spot nodes provisioned right now — metered. Elastic burst, drawn only after committed is full; $0 when none are running."},
+    {k:'Cloud $/hr', v:`$${cost.toFixed(2)}`, s:cost>0?'illustrative':'$0 at the margin', cls:(cost>0?'amber':'zero'), t:"Illustrative metered cost of the on-demand cloud running now (author-chosen constant, not a quote). Committed capacity is $0 at the margin."},
   ];
-  if(pending>0) cells.push({k:'Pending', v:`${pending}`, s:'waiting on capacity', cls:'amber'});
+  if(pending>0) cells.push({k:'Pending', v:`${pending}`, s:'waiting on capacity', cls:'amber', t:"Pods with no node — higher-priority demand the finite fleet has no room to place."});
   document.getElementById('scoreboard').innerHTML=cells.map(x=>
-    `<div class="sb"><div class="k">${x.k}</div><div class="v ${x.cls}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
+    `<div class="sb" title="${x.t||''}"><div class="k">${x.k}</div><div class="v ${x.cls}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
 }
 
 // drawBar: persistent segments (created once) whose widths animate — no innerHTML
