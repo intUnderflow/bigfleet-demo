@@ -229,18 +229,37 @@ func dashHandler(prefix, target, token string) http.Handler {
 // standalone local demo passes no --session-id, so clock is nil and there is no bar.
 type sessionClock struct {
 	id           string
-	startedAt    time.Time
-	hardDeadline time.Time
+	ttl          time.Duration
 	idleTimeout  time.Duration
 	mu           sync.Mutex
+	startedAt    time.Time
+	hardDeadline time.Time
 	lastBeat     time.Time
+	begun        bool
 }
 
 func newSessionClock(id string, ttl, idle time.Duration, now time.Time) *sessionClock {
-	return &sessionClock{id: id, startedAt: now, hardDeadline: now.Add(ttl), idleTimeout: idle, lastBeat: now}
+	return &sessionClock{id: id, ttl: ttl, startedAt: now, hardDeadline: now.Add(ttl), idleTimeout: idle, lastBeat: now}
 }
 
 func (s *sessionClock) beat(now time.Time) { s.mu.Lock(); s.lastBeat = now; s.mu.Unlock() }
+
+// begin (re)starts the visitor-facing clock at hand-out. A warm-pool session's backend boots
+// minutes before a visitor is assigned it, so the hard deadline (and idle timer) must restart
+// from the moment it's claimed — otherwise the top-bar countdown is already partly spent.
+// Idempotent: only the FIRST call (demohost's server-side hand-out) takes effect, so the
+// proxied /api/begin can't be replayed by the visitor's browser to extend the session.
+func (s *sessionClock) begin(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.begun {
+		return
+	}
+	s.begun = true
+	s.startedAt = now
+	s.hardDeadline = now.Add(s.ttl)
+	s.lastBeat = now
+}
 
 type sessionStatus struct {
 	Hosted           bool   `json:"hosted"`
@@ -258,9 +277,11 @@ type sessionStatus struct {
 func (s *sessionClock) snapshot(now time.Time) sessionStatus {
 	s.mu.Lock()
 	last := s.lastBeat
+	started := s.startedAt
+	hard := s.hardDeadline
 	s.mu.Unlock()
 	idleDeadline := last.Add(s.idleTimeout)
-	exp, reason := s.hardDeadline, "scheduled"
+	exp, reason := hard, "scheduled"
 	if idleDeadline.Before(exp) {
 		exp, reason = idleDeadline, "idle"
 	}
@@ -270,12 +291,12 @@ func (s *sessionClock) snapshot(now time.Time) sessionStatus {
 	}
 	return sessionStatus{
 		Hosted: true, ID: s.id,
-		StartedAt:    s.startedAt.UTC().Format(time.RFC3339),
-		HardDeadline: s.hardDeadline.UTC().Format(time.RFC3339),
+		StartedAt:    started.UTC().Format(time.RFC3339),
+		HardDeadline: hard.UTC().Format(time.RFC3339),
 		IdleDeadline: idleDeadline.UTC().Format(time.RFC3339),
 		ExpiresAt:    exp.UTC().Format(time.RFC3339), ExpiresReason: reason,
 		Now: now.UTC().Format(time.RFC3339), RemainingSeconds: rem,
-		Expired: now.After(s.hardDeadline) || now.After(idleDeadline),
+		Expired: now.After(hard) || now.After(idleDeadline),
 	}
 }
 
@@ -294,6 +315,18 @@ func heartbeatHandler(clock *sessionClock) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if clock != nil {
 			clock.beat(time.Now())
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// beginHandler is called once by demohost when a (possibly long-warmed) session is handed to
+// a visitor — it starts the visitor clock from now. Idempotent on the clock, so it's safe even
+// though it's reachable through the public /s/{id} proxy.
+func beginHandler(clock *sessionClock) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if clock != nil {
+			clock.begin(time.Now())
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -376,6 +409,7 @@ func main() {
 	mux.HandleFunc("/api/stream", hub.serveSSE)
 	mux.HandleFunc("/api/session", sessionHandler(clock))
 	mux.HandleFunc("/api/heartbeat", heartbeatHandler(clock))
+	mux.HandleFunc("/api/begin", beginHandler(clock))
 	mux.HandleFunc("/api/demand", limited(demandHandler(clusters)))
 	mux.HandleFunc("/api/reset", limited(resetHandler(clusters, *baseline, *donorDemand)))
 	mux.HandleFunc("/api/scenario", limited(scenarioHandler(clusters)))

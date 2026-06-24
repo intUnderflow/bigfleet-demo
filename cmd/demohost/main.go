@@ -408,11 +408,27 @@ func (h *host) takePooledLocked(now time.Time) *session {
 			s.Pooled = false
 			s.State = "running"
 			s.lastSeenOK = now
-			s.assignedAt = now // visitor's session clock starts at hand-out
+			s.assignedAt = now            // visitor's session clock starts at hand-out
+			s.ExpiresAt = now.Add(h.cfg.ttl) // restart the reap hard-cap from hand-out, not warm-time
 			return s
 		}
 	}
 	return nil
+}
+
+// beginBackend tells a just-handed-out session's backend to (re)start the visitor-facing
+// clock NOW. A warm-pool backend booted minutes before the visitor arrived, so without this
+// its top-bar countdown and idle timer would already be partly spent. Best-effort + idempotent
+// on the backend (so the public /s/{id} proxy can't be used to extend a session).
+func (h *host) beginBackend(s *session) {
+	cl := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/api/begin", s.PortBase), nil)
+	resp, err := cl.Do(req)
+	if err != nil {
+		fmt.Printf("demohost: begin clock for %s failed: %v\n", s.ID, err)
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 func (h *host) poolLoop(ctx context.Context) {
@@ -559,6 +575,7 @@ func (h *host) createSession(w http.ResponseWriter, r *http.Request) {
 	// Warm pool: if a pre-warmed, baseline-settled session is ready, hand it out instantly.
 	if s := h.takePooledLocked(now); s != nil {
 		h.mu.Unlock()
+		h.beginBackend(s) // start the visitor clock at hand-out, not at warm-boot
 		fmt.Printf("demohost: handed pooled session %s to a visitor (instant)\n", s.ID)
 		writeJSON(w, http.StatusCreated, s)
 		return
@@ -603,6 +620,7 @@ func (h *host) createSession(w http.ResponseWriter, r *http.Request) {
 	s.State = "running"
 	s.lastSeenOK = time.Now()
 	h.mu.Unlock()
+	h.beginBackend(s) // spawn took ~a minute; start the visitor clock now that it's ready
 	fmt.Printf("demohost: session %s up at %s\n", id, s.URL)
 	writeJSON(w, http.StatusCreated, s)
 }
