@@ -28,11 +28,22 @@ for c in "${CLUSTERS[@]}"; do
     | sed -E "s#server: .*#server: $hostsrv#" \
     | sed -E 's#certificate-authority-data:.*#insecure-skip-tls-verify: true#' > "$dkc"
   docker rm -f "$dn" >/dev/null 2>&1 || true
-  docker run -d --name "$dn" --restart unless-stopped --tmpfs /tmp:rw,size=64m \
-    -p "127.0.0.1:$port:9090" -v "$dkc:/kc:ro" "$IMG" \
-    --kubeconfig=/kc --insecure-bind-address=0.0.0.0 --insecure-port=9090 \
-    --enable-insecure-login --enable-skip-login --disable-settings-authorizer >/dev/null 2>&1 \
-    && echo "$c http://localhost:$port" >> "$RUN/dashboards" \
-    && log "Kubernetes dashboard for $c -> http://localhost:$port" || log "dashboard for $c failed (non-fatal)"
+  chmod 0644 "$dkc" 2>/dev/null || true
+  # Create + `docker cp` the kubeconfig in + start, instead of a host bind-mount (-v $dkc:/kc):
+  # the public runner locks Docker file-sharing to the kwok dir for security, so run/sessions/
+  # is NOT a mountable path there (a bind-mount silently leaves the container stuck "Created").
+  # Copying the kubeconfig into the container's own fs needs no host mount — and is a harmless
+  # equivalent on an unlocked dev machine. (uid-1001 dashboard reads /kc, hence chmod 0644.)
+  if docker create --name "$dn" --restart unless-stopped --tmpfs /tmp:rw,size=64m \
+       -p "127.0.0.1:$port:9090" "$IMG" \
+       --kubeconfig=/kc --insecure-bind-address=0.0.0.0 --insecure-port=9090 \
+       --enable-insecure-login --enable-skip-login --disable-settings-authorizer >/dev/null 2>&1 \
+     && docker cp "$dkc" "$dn:/kc" >/dev/null 2>&1 \
+     && docker start "$dn" >/dev/null 2>&1; then
+    echo "$c http://localhost:$port" >> "$RUN/dashboards"
+    log "Kubernetes dashboard for $c -> http://localhost:$port"
+  else
+    log "dashboard for $c failed (non-fatal)"
+  fi
   port=$((port+1))
 done
