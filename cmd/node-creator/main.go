@@ -42,11 +42,12 @@ const (
 //   firstReady: when we first saw an UpcomingNode Ready — drives the provisioning dwell.
 //   drainAt:    when a reclaimed (cordoned) node may finally be deleted — the drain window.
 var (
-	firstReady = map[string]time.Time{}
-	drainAt    = map[string]time.Time{}
-	dwellMin   time.Duration
-	dwellMax   time.Duration
-	drainDwell time.Duration
+	firstReady  = map[string]time.Time{}
+	drainAt     = map[string]time.Time{}
+	dwellMin    time.Duration
+	dwellMax    time.Duration
+	drainDwell  time.Duration
+	warmupUntil time.Time // until this instant, mint nodes with NO dwell (fast initial baseline)
 )
 
 func main() {
@@ -56,8 +57,10 @@ func main() {
 	dMin := flag.Duration("dwell-min", 15*time.Second, "min simulated provisioning dwell before a minted node appears Ready")
 	dMax := flag.Duration("dwell-max", 40*time.Second, "max simulated provisioning dwell (jittered per node)")
 	dDrain := flag.Duration("drain-dwell", 20*time.Second, "simulated drain window: a reclaimed node is cordoned this long before deletion")
+	warmup := flag.Duration("warmup", 0, "startup warmup window during which nodes mint with NO dwell, so a fresh session's initial baseline settles fast (the dwell still applies after, for the interactive provisioning moments)")
 	flag.Parse()
 	dwellMin, dwellMax, drainDwell = *dMin, *dMax, *dDrain
+	warmupUntil = time.Now().Add(*warmup)
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
@@ -141,8 +144,12 @@ func tick(ctx context.Context, c ctrlclient.Client, nodePods string) error {
 		if _, ok := firstReady[u.Name]; !ok {
 			firstReady[u.Name] = now
 		}
-		if now.Sub(firstReady[u.Name]) < dwellFor(u.Name) {
-			continue // still provisioning
+		// Warmup window: a fresh session's INITIAL baseline shouldn't make the visitor wait —
+		// mint immediately so the fleet settles fast. The dwell still applies AFTER warmup, for
+		// the interactive "watch BigFleet provision" moments where "transfer speed simulated"
+		// matters; a user acting during warmup just sees quick provisioning.
+		if !now.Before(warmupUntil) && now.Sub(firstReady[u.Name]) < dwellFor(u.Name) {
+			continue // past warmup and still within the dwell -> still provisioning
 		}
 		n := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: nodeLabels(u), Annotations: nodeAnnotations()},

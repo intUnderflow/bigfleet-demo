@@ -46,7 +46,10 @@ for c in "${CLUSTERS[@]}"; do
     --kubeconfig="$RUN/$c.kubeconfig" --metrics-addr=0
   start "$c-upc.log" "$BIN/upc" --kubeconfig="$RUN/$c.kubeconfig" --metrics-addr=0 \
     --priority-class-defaults="$HACK_DIR/priority-penalties.yaml"
-  start "$c-node-creator.log" "$BIN/node-creator" --kubeconfig="$RUN/$c.kubeconfig"
+  # --warmup: mint the initial baseline nodes with NO dwell so a fresh session settles to its
+  # at-rest state in seconds (the dwell still applies after, for the interactive moments).
+  start "$c-node-creator.log" "$BIN/node-creator" --kubeconfig="$RUN/$c.kubeconfig" \
+    --warmup "${NODE_WARMUP:-45s}"
 done
 
 if [ "$DASHBOARDS" = "1" ]; then
