@@ -8,6 +8,10 @@ compatibility_date = "2025-07-18"
 # Entries may be strings or { "url": "...", "name": "..." } objects.
 [vars]
 RUNNERS = '["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]'
+# Minimum invisible reCAPTCHA v3 score (0..1) a visitor must clear to be spent a live
+# session; below it (or with no token) they fall through to the static /demo tour. 0.5 is
+# Google's suggested default. Raise toward 0.7 to be stingier, lower to be more permissive.
+RECAPTCHA_MIN_SCORE = "0.5"
 
 # KV: ip -> session assignment (auto-expires at session end). REQUIRED — the build FAILS until
 # `id` is a real namespace id from YOUR account. Create it once:
@@ -24,6 +28,10 @@ preview_id = "1bc60c4b633d4655ae3450ca8ac5aafb"
 # pattern = "bigfleet-demo.lucy.sh/*"
 # zone_name = "lucy.sh"
 
-# DEMOHOST_KEY is a SECRET — never in this file. Set it with:
-#   npx wrangler secret put DEMOHOST_KEY     # paste the contents of ../secrets/demohost.key
-# For `wrangler dev`, put DEMOHOST_KEY (and a localhost RUNNERS override) in worker/.dev.vars
+# DEMOHOST_KEY and RECAPTCHA_SECRET are SECRETS — never in this file. For a Workers-Builds
+# (git-integrated) deploy, add them under Settings -> Variables and Secrets in the dashboard;
+# for a CLI deploy:
+#   npx wrangler secret put DEMOHOST_KEY       # paste the contents of ../secrets/demohost.key
+#   npx wrangler secret put RECAPTCHA_SECRET   # paste the reCAPTCHA v3 secret key
+# For `wrangler dev`, put DEMOHOST_KEY, RECAPTCHA_SECRET (and a localhost RUNNERS override)
+# in worker/.dev.vars.

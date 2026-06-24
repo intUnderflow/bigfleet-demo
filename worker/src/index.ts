@@ -1,24 +1,29 @@
 /**
  * BigFleet demo coordinator — the Cloudflare Worker at bigfleet-demo.lucy.sh.
  *
- * It is the public front door and the only thing that creates sessions. It knows the
- * runners (demohost daemons) by their internet addresses and current capacity, assigns
- * each visitor — keyed by IP — to a session on a runner with headroom, and reverse-proxies
- * the visitor's traffic to that session. When a session ends (the 1-hour cap, or ~5 minutes
- * after the tab closes), the runner serves 410 for it and the visitor's next request gets a
- * fresh session on a runner that still has room.
+ * Public front door + the only thing that creates sessions. A visitor arrives from the
+ * BigFleet homepage's "Demo" button carrying an invisible reCAPTCHA v3 token. The Worker
+ * scores the token and checks fleet capacity, and only then spends a live session on them.
+ * A low score, a missing token, or no free capacity all fall through to the static
+ * /demo tour instead of a dead end. Once assigned, the visitor (keyed by IP) is
+ * reverse-proxied to their session until it ends; ending sends them back to the front
+ * door to re-enter through the gate rather than silently handing out another slot.
  *
  * Config:
- *   RUNNERS       (var)    JSON array of runner base URLs, e.g.
- *                          ["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]
- *                          (entries may also be objects {"url":"...","name":"..."}).
- *   DEMOHOST_KEY  (secret) the coordinator key — sent as X-Demo-Key to each runner's /v1/*.
- *   SESSIONS      (KV)     ip -> {runner,id,expiresAt}; auto-expires at session end.
+ *   RUNNERS             (var)    JSON array of runner base URLs, e.g.
+ *                                ["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]
+ *                                (entries may also be objects {"url":"...","name":"..."}).
+ *   RECAPTCHA_MIN_SCORE (var)    minimum reCAPTCHA v3 score (0..1) to earn a slot; default 0.5.
+ *   DEMOHOST_KEY        (secret) the coordinator key — sent as X-Demo-Key to each runner's /v1/*.
+ *   RECAPTCHA_SECRET    (secret) the reCAPTCHA v3 secret — sent to Google's siteverify.
+ *   SESSIONS            (KV)     ip -> {runner,id,expiresAt}; auto-expires at session end.
  */
 
 interface Env {
   RUNNERS: string;
+  RECAPTCHA_MIN_SCORE?: string;
   DEMOHOST_KEY: string;
+  RECAPTCHA_SECRET: string;
   SESSIONS: KVNamespace;
 }
 
@@ -29,6 +34,9 @@ interface Assignment {
 }
 
 const KV_PREFIX = "ip:";
+const HOME_URL = "https://bigfleet.lucy.sh/"; // front door — re-enter the demo through the gate
+const TOUR_URL = "https://bigfleet.lucy.sh/demo"; // the static, always-available terminal tour
+const DEMO_URL = "https://bigfleet-demo.lucy.sh/"; // clean demo URL (no one-time token)
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -41,36 +49,39 @@ export default {
     const ip = visitorIP(request);
     const kvKey = KV_PREFIX + ip;
 
-    // The interstitial calls this to (idempotently) get a session for this IP.
-    if (url.pathname === "/_coordinator/assign" && request.method === "POST") {
-      let a = await readAssignment(env, kvKey);
-      if (!a) {
-        a = await assignNew(env);
-        if (!a) return json({ full: true }, 503);
-        await writeAssignment(env, kvKey, a);
-      }
-      return json({ ready: true });
-    }
-
+    // Already in a session -> proxy to it. When the session has ended the runner serves 410
+    // (or it's unreachable, 502); we drop the assignment and send the visitor back to the
+    // front door. We deliberately do NOT silently mint another session — re-entry is rescored
+    // and rechecked for capacity through the gate like any new visit, so one IP can't camp a
+    // scarce slot indefinitely.
     const assignment = await readAssignment(env, kvKey);
-    if (!assignment) {
-      // No session yet for this IP — show the "spinning up" interstitial, which POSTs
-      // /_coordinator/assign and reloads once a session exists. (Keeps the first paint
-      // instant instead of hanging ~10-30s on session bring-up.)
-      return html(interstitialPage());
+    if (assignment) {
+      const resp = await proxyToSession(request, url, assignment);
+      if (resp.status === 410 || resp.status === 502) {
+        await env.SESSIONS.delete(kvKey);
+        return Response.redirect(HOME_URL, 302);
+      }
+      return resp;
     }
 
-    // Proxy to the assigned session. Clone first so we can retry on a dead session.
-    const retry = request.clone();
-    let resp = await proxyToSession(request, url, assignment);
-    if (resp.status === 410 || resp.status === 502) {
-      await env.SESSIONS.delete(kvKey);
-      const fresh = await assignNew(env);
-      if (!fresh) return html(busyPage(), 503);
-      await writeAssignment(env, kvKey, fresh);
-      resp = await proxyToSession(retry, url, fresh);
+    // New visitor: the gate. Earn a live slot with a good reCAPTCHA score AND free capacity;
+    // anything short of that falls through to the static tour (never a dead end).
+    const token = url.searchParams.get("rc") || "";
+    const score = token ? await verifyRecaptcha(env, token, ip) : -1;
+    const minScore = parseFloat(env.RECAPTCHA_MIN_SCORE || "") || 0.5;
+    if (!(score >= minScore)) {
+      // missing / invalid / forged token, or low reputation (likely a bot) -> tour
+      return Response.redirect(TOUR_URL, 302);
     }
-    return resp;
+    const fresh = await assignNew(env);
+    if (!fresh) {
+      // good human, but every runner is full right now -> tour
+      return Response.redirect(TOUR_URL, 302);
+    }
+    await writeAssignment(env, kvKey, fresh);
+    // Assigned — bounce to the clean URL so the one-time token leaves the address bar; the
+    // next request finds the session in KV and proxies straight into the live demo.
+    return Response.redirect(DEMO_URL, 302);
   },
 };
 
@@ -80,6 +91,35 @@ function visitorIP(request: Request): string {
     request.headers.get("X-Forwarded-For")?.split(",")[0].trim() ||
     "anon"
   );
+}
+
+/**
+ * verifyRecaptcha scores an invisible reCAPTCHA v3 token via Google's siteverify. Returns the
+ * 0..1 reputation score, or -1 if the token is missing/invalid/forged, the secret is unset, or
+ * the token was minted for a different action. The caller compares it to RECAPTCHA_MIN_SCORE.
+ */
+async function verifyRecaptcha(env: Env, token: string, ip: string): Promise<number> {
+  if (!env.RECAPTCHA_SECRET) return -1;
+  try {
+    const body = new URLSearchParams({ secret: env.RECAPTCHA_SECRET, response: token });
+    if (ip && ip !== "anon") body.set("remoteip", ip);
+    const r = await fetch("https://www.google.com/recaptcha/api/siteverify", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!r.ok) return -1;
+    const v = (await r.json()) as {
+      success?: boolean;
+      score?: number;
+      action?: string;
+    };
+    if (!v.success) return -1;
+    if (v.action && v.action !== "demo") return -1; // token minted for a different action
+    return typeof v.score === "number" ? v.score : -1;
+  } catch {
+    return -1;
+  }
 }
 
 function parseRunners(env: Env): string[] {
@@ -171,62 +211,4 @@ async function proxyToSession(request: Request, url: URL, a: Assignment): Promis
   } catch {
     return new Response("session backend unreachable", { status: 502 });
   }
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function html(body: string, status = 200): Response {
-  return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
-}
-
-const SHELL = (title: string, inner: string) => `<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title><style>
-:root{color-scheme:dark light}
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-  background:#17181c;color:#edeef3;font:15px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-@media(prefers-color-scheme:light){body{background:#fff;color:#17181c}}
-.card{max-width:440px;text-align:center;padding:32px}
-.logo{display:inline-flex;gap:9px;align-items:center;font-weight:600;font-size:18px;color:#2563eb;margin-bottom:18px}
-h1{font-size:19px;margin:0 0 8px}
-p{color:#888c96;margin:0 0 18px}
-.spin{width:30px;height:30px;border:3px solid #353841;border-top-color:#2563eb;border-radius:50%;
-  margin:6px auto 18px;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}
-button{background:#2563eb;color:#fff;border:0;border-radius:9px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer}
-</style></head><body><div class="card">
-<div class="logo"><svg viewBox="0 0 64 64" width="22" height="22"><rect x="6" y="20" width="14" height="14" rx="2" fill="#2563eb"/><rect x="25" y="14" width="14" height="14" rx="2" fill="#3b82f6"/><rect x="44" y="20" width="14" height="14" rx="2" fill="#60a5fa"/><rect x="6" y="40" width="14" height="14" rx="2" fill="#1d4ed8"/><rect x="25" y="34" width="14" height="14" rx="2" fill="#2563eb"/><rect x="44" y="40" width="14" height="14" rx="2" fill="#3b82f6"/></svg><span>BigFleet</span></div>
-${inner}</div></body></html>`;
-
-function interstitialPage(): string {
-  return SHELL(
-    "BigFleet — starting your demo",
-    `<div class="spin"></div><h1>Spinning up your live demo…</h1>
-<p>Standing up real Kubernetes clusters and a BigFleet shard just for you. This takes a few seconds.</p>
-<p id="msg" style="display:none"></p>
-<script>
-(async function(){
-  try{
-    const r = await fetch('/_coordinator/assign',{method:'POST'});
-    if(r.ok){ location.reload(); return; }
-  }catch(e){}
-  document.querySelector('.spin').style.display='none';
-  var m=document.getElementById('msg'); m.style.display='block';
-  m.innerHTML='All demo sessions are busy right now. <br><button onclick="location.reload()">Try again</button>';
-})();
-</script>`,
-  );
-}
-
-function busyPage(): string {
-  return SHELL(
-    "BigFleet — all sessions busy",
-    `<h1>All demo sessions are busy</h1>
-<p>Every live session is in use right now. Each one frees up within the hour — please try again shortly.</p>
-<button onclick="location.reload()">Try again</button>`,
-  );
 }
