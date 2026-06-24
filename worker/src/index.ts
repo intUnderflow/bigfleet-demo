@@ -65,6 +65,21 @@ export default {
       return handleGate(request, env, ip, kvKey);
     }
 
+    // Homepage "Demo" button (casual intent) arrives with a one-time ?rc=<v3-token>. Resolve
+    // it FIRST, and always end in a clean redirect, so the token never reaches the session or
+    // lingers in the address bar — whether we assign now or the visitor is already in. (Were
+    // this below the proxy branch, a click while already in a session would forward ?rc=...
+    // straight through to the demo.)
+    if (url.searchParams.has("rc")) {
+      if (await readAssignment(env, kvKey)) return Response.redirect(DEMO_URL, 302);
+      const score = await scoreV3(env, url.searchParams.get("rc") || "", ip);
+      if (!(score >= minScore(env))) return Response.redirect(TOUR_URL, 302);
+      const fresh = await assignNew(env);
+      if (!fresh) return Response.redirect(TOUR_URL, 302);
+      await writeAssignment(env, kvKey, fresh);
+      return Response.redirect(DEMO_URL, 302);
+    }
+
     // Already in a session -> proxy. When the session has ended the runner serves 410 (or
     // it's unreachable, 502); we drop the assignment and send the visitor back to the front
     // door. We deliberately do NOT silently mint another session — re-entry is rescored and
@@ -77,18 +92,6 @@ export default {
         return Response.redirect(HOME_URL, 302);
       }
       return resp;
-    }
-
-    // Homepage "Demo" button (casual): arrives with a v3 token, scored once. Good score +
-    // capacity -> session; anything short of that -> the static tour (no second chance here).
-    const token = url.searchParams.get("rc") || "";
-    if (token) {
-      const score = await scoreV3(env, token, ip);
-      if (!(score >= minScore(env))) return Response.redirect(TOUR_URL, 302);
-      const fresh = await assignNew(env);
-      if (!fresh) return Response.redirect(TOUR_URL, 302);
-      await writeAssignment(env, kvKey, fresh);
-      return Response.redirect(DEMO_URL, 302);
     }
 
     // Direct hit, no session: serve the v3-then-v2 gate page (strong intent gets a real
