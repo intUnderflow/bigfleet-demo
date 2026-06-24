@@ -682,16 +682,15 @@ function renderStats(d: {
   const fmap: Record<string, number> = {};
   d.funnel.forEach((r) => (fmap[String(r.step)] = num(r.n)));
   const SECTIONS: [number, string][] = [
-    [1, "What BigFleet is"],
+    [1, "Not another cluster autoscaler"],
     [2, "Your fleet"],
-    [3, "Three kinds of capacity"],
-    [4, "Move demand"],
-    [5, "Drop demand"],
-    [6, "Capacity flows across clusters"],
-    [7, "Saturate the fleet"],
-    [8, "Preemption"],
-    [9, "Prove the clusters are real"],
-    [10, "What's real / simulated"],
+    [3, "Capacity moves between clusters"],
+    [4, "Preemption across the fleet"],
+    [5, "How it chooses (cheapest first)"],
+    [6, "Drive it yourself (provision/reclaim)"],
+    [7, "The fleet is finite"],
+    [8, "Prove the clusters are real"],
+    [9, "What's real / simulated"],
   ];
   const landed = fmap["landed"] || fmap["section:1"] || 0;
   const funnelRows = SECTIONS.map(([nn, label]) => {

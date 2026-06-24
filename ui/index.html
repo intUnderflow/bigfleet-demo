@@ -187,70 +187,69 @@
   <div class="layout">
     <!-- LEFT: the guided tutorial -->
     <aside class="doc">
-      <h1>Watch infrastructure move</h1>
-      <p class="lede">A live, interactive demo of <b>BigFleet</b> — a fleet-level infrastructure autoscaler. Read down the page and press the buttons; the fleet on the right reacts in real time.</p>
+      <h1>Watch capacity move across a fleet</h1>
+      <p class="lede">A live, interactive demo of <b>BigFleet</b> — a fleet-level infrastructure autoscaler. Press the buttons; the fleet on the right reacts in real time. We lead with the part a per-cluster autoscaler <b>can&rsquo;t</b> do — then show how it decides, and prove it&rsquo;s real.</p>
 
       <section>
-        <h2><span class="n">1</span>What BigFleet is</h2>
-        <p>Most autoscalers add or remove <b>pods</b>, or grow a single cluster. BigFleet works a level up: it manages one <b>finite pool of compute capacity shared across many clusters</b> and moves that capacity to wherever it&rsquo;s needed — provisioning nodes where high-priority demand lands, reclaiming idle nodes elsewhere, and <b>preferring cheap capacity over expensive</b>.</p>
-        <p>It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own scheduler does that. This demo runs BigFleet&rsquo;s real engine against a simulated cloud.</p>
+        <h2><span class="n">1</span>Not another cluster autoscaler</h2>
+        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it. BigFleet works a level up: it manages <b>one finite pool of compute shared across many clusters</b> and <b>moves that capacity between them</b> — reclaiming idle nodes in one cluster to serve unschedulable work in another, preempting low-priority work across the fleet under scarcity, and preferring cheap capacity over expensive. Same hardware you already own, repurposed in place.</p>
+        <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated cloud.</p>
       </section>
 
       <section>
-        <h2><span class="n">2</span>Your fleet</h2>
-        <p>On the right are three clusters — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b>. Each is a <b>real Kubernetes apiserver</b>, pre-loaded with baseline workloads already running on nodes BigFleet provisioned for them.</p>
+        <h2><span class="n">2</span>Your fleet — three clusters, one finite pool</h2>
+        <p>On the right: three <b>real Kubernetes clusters</b> — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b> — drawing on <b>one shared, finite pool</b> of machines, pre-loaded with baseline workloads. At rest they sit entirely on already-paid-for <b>committed</b> capacity at <b>$0/hr</b>. The pool can&rsquo;t grow past its ceiling — which is exactly why <i>moving</i> capacity is the whole game.</p>
       </section>
 
       <section>
-        <h2><span class="n">3</span>Three kinds of capacity: committed, on-demand, spot</h2>
-        <p>BigFleet sorts capacity by <b>cost</b> — specifically by <code>effective_cost = price + interruption_probability × penalty</code>. What matters isn&rsquo;t <i>where</i> a machine lives but what it costs to put a given workload on it. The fleet draws on <b>three tiers</b>, shared across all three clusters:</p>
-        <p>&bull; <b style="color:var(--onprem)">Committed</b> — on-prem bare metal you own <b>or reserved cloud</b> (reserved instances / savings plans). Already paid for, so putting work on it costs <b>~$0 at the margin</b>. BigFleet fills this <b>first</b>.</p>
-        <p>&bull; <b style="color:var(--gcp)">On-demand cloud</b> (GCP / AWS) — elastic, pay-per-use, <b>stable</b>. You pay only while a node runs; the rest is headroom that costs nothing until provisioned.</p>
-        <p>&bull; <b style="color:var(--spot)">Spot</b> — the same cloud SKUs, much cheaper, but <b>interruptible</b>. For <b>interruption-tolerant</b> demand BigFleet <b>provisions cheap spot</b> (lowest effective cost); for <b>interruption-sensitive</b> demand it provisions stable on-demand instead — because spot&rsquo;s interruption term outweighs the saving for that work. That capacity trade-off is the real engine math, not a script. (Which <i>pod</i> lands on which node is then the stock kube-scheduler&rsquo;s bin-packing — a separate layer.)</p>
-        <p class="small">Each tier is <b>declared by a real <code>CapacityProvider</code></b>: three out-of-tree providers (on-prem bare-metal, AWS, GCP) that implement the genuine <code>providerkit</code> six-RPC contract and <b>pass the BigFleet conformance suite</b> (<code>core,cloud,spot</code>) — only the substrate underneath is simulated (kwok). Committed is ~28 on-prem <code>bare-metal-8vcpu</code> + ~20 AWS reserved <code>m6i.2xlarge</code> ($0-marginal); on-demand &amp; spot share the burst SKUs <code>m5.2xlarge</code> / <code>n2-standard-8</code>, differing only in price + interruption. At rest you&rsquo;re entirely on committed capacity at <b>$0/hr</b>. This is the whole finite fleet — it can&rsquo;t grow past its ceiling.</p>
-      </section>
-
-      <section>
-        <h2><span class="n">4</span>Move demand → committed fills, then cloud bursts</h2>
-        <p>Add a burst of <b>production demand</b> to cluster-A. The new pods <b>request capacity</b> the cluster doesn&rsquo;t have, so they go <b>pending</b>; BigFleet packs their requests onto fresh nodes — roughly <b>one node per step of demand</b> — topping out the already-paid-for <b>committed</b> pool first, then <b>bursting onto on-demand cloud</b>. Watch the committed bar fill, nodes take a few moments to provision, and <b>on-demand cloud spend tick up from $0</b>.</p>
-        <div class="actions"><button class="action" onclick="setDemand('cluster-a',20)">▶ Add demand to cluster-A</button></div>
-        <p class="small">The <b>decision</b> — committed-before-on-demand — is BigFleet&rsquo;s real Phase-1 cheapest-first logic; each node <b>bin-packs several pods</b> (open a dashboard to see). This demand scales OUT (new nodes), it doesn&rsquo;t evict anything — <b>priority &amp; preemption come later</b> (§8). The <b>provisioning time</b> is a simulated dwell.</p>
-      </section>
-
-      <section>
-        <h2><span class="n">5</span>Drop demand → cloud is shed first</h2>
-        <p>Now remove that demand. BigFleet <b>reclaims</b> the freed nodes — and it sheds the <b>billed on-demand cloud</b> nodes first (cloud spend falls back toward $0), keeping the already-paid-for committed capacity warm in the shared pool.</p>
-        <div class="actions"><button class="action" onclick="setDemand('cluster-a',0)">▶ Drop cluster-A&rsquo;s demand</button></div>
-      </section>
-
-      <section>
-        <h2><span class="n">6</span>Capacity flows between clusters</h2>
-        <p>Capacity follows demand across the fleet. Spike a <b>different</b> cluster and watch the freed capacity flow there instead.</p>
+        <h2><span class="n">3</span>Capacity moves between clusters</h2>
+        <p>Here&rsquo;s the payoff. <b>cluster-B</b> gets a burst of demand its nodes can&rsquo;t hold. A per-cluster autoscaler would <b>buy a brand-new node</b>. Watch BigFleet instead <b>reclaim an idle node from cluster-A and move it to cluster-B</b> — the same machine you already own, repurposed in place: no new spend, no waiting on the cloud.</p>
         <div class="actions">
           <button class="action" onclick="scenario('move')">▶ Move capacity from cluster-A to cluster-B</button>
           <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
         </div>
+        <p class="small">This cross-cluster reallocation is BigFleet&rsquo;s real logic — idle capacity in one cluster serving unschedulable demand in another, both bound to one shard. Only the few seconds a node takes to drain and re-attach is a simulated dwell.</p>
       </section>
 
       <section>
-        <h2><span class="n">7</span>Saturate the finite fleet</h2>
-        <p>A real platform doesn&rsquo;t have infinite capacity — and neither does this one. Committed capacity is fixed, and the on-demand cloud quota has a ceiling too. Push demand onto <b>all three clusters at once</b>: the committed pool fills, the on-demand cloud pool fills behind it, and cloud spend climbs to its peak — until nearly every machine is in use.</p>
-        <div class="actions"><button class="action" onclick="scenario('saturate')">▶ Saturate the fleet (load all 3 clusters)</button></div>
-        <p class="small">Watch the committed bar max out, the cloud bar fill, and the <b>cost</b> rise — this is the condition where a <i>fleet-level</i> autoscaler earns its keep.</p>
-      </section>
-
-      <section>
-        <h2><span class="n">8</span>Critical demand into a full fleet → preemption</h2>
-        <p>This is the moment a finite fleet matters. The fleet is full, but a burst of <b>critical production demand</b> (PriorityClass <code>critical</code>) lands on cluster-A. With no capacity left to provision, <b>priority decides</b>: the real Kubernetes scheduler places the critical pods first, and BigFleet reallocates capacity toward them — so the lower-priority <b>batch</b> work (PriorityClass <code>batch</code>) is what&rsquo;s left waiting. The fleet serves what matters most.</p>
+        <h2><span class="n">4</span>A full fleet → preemption across the fleet</h2>
+        <p>The other thing only a <i>fleet-level</i> autoscaler does. We <b>fill the finite fleet</b>, then a burst of <b>critical</b> production demand (PriorityClass <code>critical</code>) lands with no capacity left to provision. <b>Priority decides</b>: the real Kubernetes scheduler preempts running <b>batch</b> work to place the critical pods, and BigFleet reallocates the finite fleet toward what matters — the low-priority batch is what&rsquo;s left waiting, not the work that counts.</p>
         <div class="actions">
-          <button class="action" onclick="scenario('critical')">▶ Send critical demand into the full fleet</button>
+          <button class="action" onclick="scenario('critical')">▶ Fill the fleet, then send in critical demand</button>
           <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
         </div>
-        <p class="small">Watch the fleet fill to its cap, then the real Kubernetes scheduler <b>preempt</b> running <b>batch</b> pods (PriorityClass <code>batch</code>) to place the <b>critical</b> demand — native preemption, real <code>Preempted</code> events. Both the scheduler&rsquo;s priority decision and BigFleet&rsquo;s capacity reallocation are real; only the provisioning time is simulated. BigFleet doesn&rsquo;t invent capacity — it allocates a finite fleet by priority.</p>
+        <p class="small">Real <code>Preempted</code> events from the stock scheduler; real BigFleet reallocation. BigFleet doesn&rsquo;t invent capacity — it allocates a finite fleet by priority. Only the provisioning time is simulated.</p>
+      </section>
+
+      <p class="lede" style="margin-top:36px">That&rsquo;s the payoff — capacity moving across a finite fleet, the part no per-cluster autoscaler can reach. The rest is <b>how it decides</b>, and proof it&rsquo;s all real.</p>
+
+      <section>
+        <h2><span class="n">5</span>How it chooses: cheapest capacity first</h2>
+        <p>Every move above is driven by <b>cost</b>: BigFleet scores candidate capacity by <code>effective_cost = price + interruption_probability × penalty</code> and fills the cheapest first. Three tiers, shared across all clusters:</p>
+        <p>&bull; <b style="color:var(--onprem)">Committed</b> — on-prem bare metal you own <b>or reserved cloud</b>. Already paid for, so work on it costs <b>~$0 at the margin</b>. Filled <b>first</b>.</p>
+        <p>&bull; <b style="color:var(--gcp)">On-demand cloud</b> (GCP / AWS) — elastic, pay-per-use, <b>stable</b>; nothing until provisioned. Burst here when committed is full.</p>
+        <p>&bull; <b style="color:var(--spot)">Spot</b> — the same SKUs, much cheaper, but <b>interruptible</b>. BigFleet routes <b>interruption-tolerant</b> work to cheap spot and <b>interruption-sensitive</b> work to stable on-demand — because spot&rsquo;s interruption term outweighs the saving for that work. Real engine math, not a script.</p>
+        <p class="small">Each tier is <b>declared by a real <code>CapacityProvider</code></b> — three out-of-tree backends (on-prem / AWS / GCP) implementing the genuine <code>providerkit</code> six-RPC contract and <b>passing the BigFleet conformance suite</b> (<code>core,cloud,spot</code>); only the substrate (kwok) is simulated. The $ prices + interruption odds are provider-<i>declared</i> illustrative constants — the engine really reasons about them, but no <i>measured</i> saving is claimed.</p>
       </section>
 
       <section>
-        <h2><span class="n">9</span>Prove the clusters are real</h2>
+        <h2><span class="n">6</span>Drive it yourself: provision &amp; reclaim</h2>
+        <p>The table-stakes scale-out/in, shown so you can watch the cost ordering up close. Add a burst of production demand and BigFleet packs the pending requests onto fresh nodes — <b>committed first</b> (still $0), then <b>bursting onto on-demand cloud</b> ($ ticks up). Drop it and it <b>sheds the billed cloud nodes first</b>, keeping paid-for committed warm.</p>
+        <div class="actions">
+          <button class="action" onclick="setDemand('cluster-a',20)">▶ Add demand to cluster-A</button>
+          <button class="action ghost" onclick="setDemand('cluster-a',0)">↺ Drop it</button>
+        </div>
+        <p class="small">This is what any autoscaler does — it&rsquo;s the fleet-level moves in §3&ndash;§4 that are BigFleet&rsquo;s alone. Each node bin-packs several pods (open a dashboard to see); the provisioning time is a simulated dwell.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">7</span>The fleet is finite</h2>
+        <p>No infinite cloud here. Committed is fixed and the on-demand quota has a ceiling. Push demand onto <b>all three clusters at once</b>: committed fills, on-demand fills behind it, and cost climbs to its peak until nearly every machine is in use. That hard ceiling is what makes the moves and preemption above <i>necessary</i> — and what a per-cluster view never sees.</p>
+        <div class="actions"><button class="action" onclick="scenario('saturate')">▶ Saturate the fleet (load all 3 clusters)</button></div>
+      </section>
+
+      <section>
+        <h2><span class="n">8</span>Prove the clusters are real</h2>
         <p>Each cluster is a genuine Kubernetes cluster — a real apiserver, the stock <b>kube-scheduler</b>, and real controllers. Open its <b>official Kubernetes dashboard</b> (opens in a new tab) and you&rsquo;ll see the real nodes BigFleet provisioned — committed on-prem <code>bm-dc1-…</code> boxes alongside cloud <code>gke-…</code> / <code>ip-10-…</code> instances tagged <code>bigfleet.demo/billing: on-demand</code> or <code>spot</code>, with their zones and regions. The nodes are <b>kwok-simulated</b> (tagged <code>bigfleet.demo/simulated</code>, <code>kwok://</code> providerID) — only the cloud is fake, never the control plane.</p>
         <p class="small">And the capacity itself flows through <b>real providers</b>: the shard provisions every node by calling three out-of-tree <code>CapacityProvider</code> backends (on-prem / AWS / GCP) over the genuine six-RPC <code>providerkit</code> contract — the same contract a real cloud provider implements, <b>conformance-certified</b> (<code>core,cloud,spot</code>). The spot-vs-on-demand tier you see on each node is BigFleet&rsquo;s real effective-cost decision read back from what the provider declared, not a label the demo painted on.</p>
         <div class="actions">
@@ -261,7 +260,7 @@
       </section>
 
       <section>
-        <h2><span class="n">10</span>What&rsquo;s real, what&rsquo;s simulated</h2>
+        <h2><span class="n">9</span>What&rsquo;s real, what&rsquo;s simulated</h2>
         <div class="rs">
           <div><span class="k">● Real</span>
             <ul><li>BigFleet&rsquo;s engine and its Phase 1/2/3 decisions — it sorts candidate capacity by <b>effective cost</b> (<code>price + interruption×penalty</code>), so it really does fill the $0-marginal committed tier first, route interruption-tolerant work to cheap <b>spot</b> and sensitive work to stable on-demand, and reclaim under pressure</li><li>The <b>three CapacityProviders</b> (on-prem / AWS / GCP) — real <code>providerkit</code> six-RPC backends that pass the BigFleet <b>conformance suite</b>; the four capacity types + prices + interruption probabilities are provider-<i>declared</i></li><li>The <b>real upstream Kubernetes scheduler</b> per cluster — native priority ordering, <b>preemption</b> &amp; bin-packing (MostAllocated), nothing hand-rolled</li><li>A real Kubernetes apiserver, scheduler &amp; controllers per cluster</li></ul></div>
