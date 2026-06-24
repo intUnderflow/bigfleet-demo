@@ -321,7 +321,17 @@ es.onopen=()=>{const c=document.getElementById('conn');c.textContent='● live';
 es.onerror=()=>{const c=document.getElementById('conn');c.textContent='● reconnecting';c.className='conn';};
 es.onmessage=e=>render(JSON.parse(e.data));
 
-function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); }
+// ── funnel tracking — deduped milestones to /_event (hosted: recorded; local/standalone: 204) ──
+var _fired={}, _funnelInit=false;
+function track(step){ if(_fired[step])return; _fired[step]=1;
+  try{ fetch('/_event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({step:step}),keepalive:true}); }catch(e){} }
+function initFunnel(){ if(_funnelInit)return; _funnelInit=true; track('landed');
+  if('IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(es){ es.forEach(function(e){ if(e.isIntersecting){
+      var nEl=e.target.querySelector('h2 .n'); if(nEl) track('section:'+nEl.textContent.trim()); } }); },{threshold:0.5});
+    document.querySelectorAll('section').forEach(function(s){ if(s.querySelector('h2 .n')) io.observe(s); });
+  } }
+function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); initFunnel(); }
 
 // renderScore: the at-a-glance fleet scoreboard — total nodes vs the finite 120-cap,
 // the committed/on-demand split, free headroom, and the honest on-demand $/hr. All
@@ -469,7 +479,7 @@ function renderFeed(st){
 function bump(ws,d){ const c=(last.clusters||[]).find(x=>x.name===ws); const lvl=Math.max(0,Math.min(40,(c?c.demand:0)+d)); setDemand(ws,lvl); }
 // tier defaults to 'demand' (standard production — preemptionPolicy:Never, provisions
 // rather than evicting batch). Section 8 passes 'critical' (preempts batch).
-function setDemand(ws,level,tier){ post('/api/demand',{workspace:ws,level:level,tier:tier||'demand'}); }
+function setDemand(ws,level,tier){ track('act:demand'); post('/api/demand',{workspace:ws,level:level,tier:tier||'demand'}); }
 function setAll(level){ (last.clusters||[]).forEach(c=>setDemand(c.name,level)); }
 // Saturate the whole fleet with CRITICAL demand, in one click, so the priority story
 // fires reliably: clear standard demand, then drive the critical tier (PriorityClass
@@ -478,9 +488,9 @@ function setAll(level){ (last.clusters||[]).forEach(c=>setDemand(c.name,level));
 function criticalSurge(){ ['cluster-a','cluster-b','cluster-c'].forEach(w => { setDemand(w,0,'demand'); setDemand(w, w==='cluster-a'?40:30, 'critical'); }); }
 // staged teaching scenarios: the backend drives the fleet to the required precondition
 // (full / contended) then injects the beat + narrates it, so §6/§7/§8 land every time.
-function scenario(name){ post('/api/scenario',{name:name}); }
+function scenario(name){ track('act:scenario'); post('/api/scenario',{name:name}); }
 function resetDemo(){ post('/api/reset',{}); }
-function openDash(ws){ const c=(last.clusters||[]).find(x=>x.name===ws); if(c&&c.dashboard){ window.open(c.dashboard,'_blank'); } else { alert('dashboard for '+ws+' is still starting — try again in a moment'); } }
+function openDash(ws){ track('act:dashboard'); const c=(last.clusters||[]).find(x=>x.name===ws); if(c&&c.dashboard){ window.open(c.dashboard,'_blank'); } else { alert('dashboard for '+ws+' is still starting — try again in a moment'); } }
 function post(u,b){ fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); }
 
 // ── Hosted-session clock ─────────────────────────────────────────────────────

@@ -77,6 +77,9 @@ export default {
     if (url.pathname === "/_queue" && request.method === "POST") {
       return handleQueue(env, ip, kvKey);
     }
+    if (url.pathname === "/_event" && request.method === "POST") {
+      return handleEvent(request, env, kvKey);
+    }
 
     // Homepage "Demo" button (casual intent) arrives with a one-time ?rc=<v3-token>. Resolve
     // it FIRST, and always end in a clean redirect, so the token never reaches the session or
@@ -195,6 +198,26 @@ async function handleQueue(env: Env, ip: string, kvKey: string): Promise<Respons
     }
   }
   return json({ queued: true, position });
+}
+
+/**
+ * handleEvent records an in-demo funnel step (e.g. "landed", "section:6", "act:dashboard") for
+ * the /stats funnel. Gated behind holding a session, so only real visitors can log — no public
+ * spam of the dataset. The UI de-dupes per page load; counts are step-reaches, not unique users.
+ */
+async function handleEvent(request: Request, env: Env, kvKey: string): Promise<Response> {
+  if (!(await readAssignment(env, kvKey))) return new Response(null, { status: 204 });
+  let step = "";
+  try {
+    const b = (await request.json()) as { step?: string };
+    step = (b.step || "").slice(0, 40);
+  } catch {}
+  if (step) {
+    try {
+      env.STATS?.writeDataPoint({ indexes: ["funnel"], blobs: [step], doubles: [1] });
+    } catch {}
+  }
+  return new Response(null, { status: 204 });
 }
 
 /** Upsert my queue ticket, preserving my original joinedAt so polling never resets my place. */
@@ -563,18 +586,19 @@ async function aeQuery(env: Env, sql: string): Promise<any[]> {
 async function statsPage(env: Env): Promise<Response> {
   const D = STATS_DATASET;
   const W = "INTERVAL '7' DAY";
-  const [outcomes, sess, capTs, sessTs] = await Promise.all([
+  const [outcomes, sess, capTs, sessTs, funnel] = await Promise.all([
     aeQuery(env, `SELECT blob1 AS outcome, blob2 AS via, sum(_sample_interval) AS n FROM ${D} WHERE index1='outcome' AND timestamp > NOW() - ${W} GROUP BY outcome, via`),
     aeQuery(env, `SELECT sum(double1*_sample_interval)/sum(_sample_interval) AS avg_dur, sum(_sample_interval) AS n FROM ${D} WHERE index1='session' AND timestamp > NOW() - ${W}`),
     aeQuery(env, `SELECT intDiv(toUInt32(timestamp),3600)*3600 AS t, sum(double1*_sample_interval)/sum(_sample_interval) AS free, sum(double2*_sample_interval)/sum(_sample_interval) AS busy, sum(double3*_sample_interval)/sum(_sample_interval) AS qd FROM ${D} WHERE index1='capacity' AND timestamp > NOW() - ${W} GROUP BY t ORDER BY t`),
     aeQuery(env, `SELECT intDiv(toUInt32(timestamp),3600)*3600 AS t, sum(_sample_interval) AS n FROM ${D} WHERE index1='session' AND timestamp > NOW() - ${W} GROUP BY t ORDER BY t`),
+    aeQuery(env, `SELECT blob1 AS step, sum(_sample_interval) AS n FROM ${D} WHERE index1='funnel' AND timestamp > NOW() - ${W} GROUP BY step`),
   ]);
   const runners = parseRunners(env);
   const caps = await Promise.all(runners.map((r) => capacityStatsOf(env, r)));
   const freeNow = caps.reduce((a, c) => a + c.free, 0);
   const busyNow = caps.reduce((a, c) => a + c.busy, 0);
   const qNow = await queueDepth(env);
-  return html(renderStats({ outcomes, sess, capTs, sessTs, freeNow, busyNow, qNow, configured: !!env.CF_API_TOKEN }));
+  return html(renderStats({ outcomes, sess, capTs, sessTs, funnel, freeNow, busyNow, qNow, configured: !!env.CF_API_TOKEN }));
 }
 
 function spark(series: { values: number[]; color: string }[], w = 300, h = 48): string {
@@ -598,6 +622,7 @@ function renderStats(d: {
   sess: any[];
   capTs: any[];
   sessTs: any[];
+  funnel: any[];
   freeNow: number;
   busyNow: number;
   qNow: number;
@@ -639,6 +664,37 @@ function renderStats(d: {
   const chart = (title: string, legend: string, svg: string) =>
     `<div class="chart"><div class="ct">${title}</div><div class="cl">${legend}</div>${svg}</div>`;
 
+  // funnel: scroll-depth through the 10-section arc + a few engagement actions
+  const fmap: Record<string, number> = {};
+  d.funnel.forEach((r) => (fmap[String(r.step)] = num(r.n)));
+  const SECTIONS: [number, string][] = [
+    [1, "What BigFleet is"],
+    [2, "Your fleet"],
+    [3, "Three kinds of capacity"],
+    [4, "Move demand"],
+    [5, "Drop demand"],
+    [6, "Capacity flows across clusters"],
+    [7, "Saturate the fleet"],
+    [8, "Preemption"],
+    [9, "Prove the clusters are real"],
+    [10, "What's real / simulated"],
+  ];
+  const landed = fmap["landed"] || fmap["section:1"] || 0;
+  const funnelRows = SECTIONS.map(([nn, label]) => {
+    const c = fmap["section:" + nn] || 0;
+    const w = landed > 0 ? Math.round((c / landed) * 100) : 0;
+    return `<div class="frow"><div class="fl">&sect;${nn} ${label}</div><div class="fbar"><i style="width:${w}%"></i></div><div class="fn">${n(c)}${landed > 0 ? " &middot; " + w + "%" : ""}</div></div>`;
+  }).join("");
+  const engage = [
+    ["act:demand", "drove demand"],
+    ["act:scenario", "ran a scenario"],
+    ["act:dashboard", "opened a dashboard"],
+  ]
+    .map(([k, label]) =>
+      card(label, n(fmap[k] || 0), landed > 0 ? pct(fmap[k] || 0, landed) + "% of those who landed" : ""),
+    )
+    .join("");
+
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>BigFleet demo — usage stats</title>
@@ -663,6 +719,14 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:#888c96;ma
 @media(prefers-color-scheme:light){.chart{background:#fff;border-color:#e3e5ea}}
 .chart .ct{font-weight:600;font-size:14px}
 .chart .cl{color:#888c96;font-size:12px;margin:1px 0 8px}
+.funnel{background:#1f2127;border:1px solid #2c2f37;border-radius:12px;padding:16px}
+@media(prefers-color-scheme:light){.funnel{background:#fff;border-color:#e3e5ea}}
+.frow{display:flex;align-items:center;gap:10px;margin:5px 0}
+.frow .fl{flex:0 0 210px;font-size:13px;color:#c9ccd4}
+@media(prefers-color-scheme:light){.frow .fl{color:#3a3f4a}}
+.frow .fbar{flex:1;height:18px;background:#2c2f37;border-radius:5px;overflow:hidden}
+.frow .fbar>i{display:block;height:100%;background:linear-gradient(90deg,#1d4ed8,#60a5fa);border-radius:5px;min-width:2px}
+.frow .fn{flex:0 0 92px;text-align:right;font-size:12.5px;color:#888c96;font-variant-numeric:tabular-nums}
 .warn{background:#3b2f12;border:1px solid #6b5418;color:#f2d999;border-radius:10px;padding:12px 14px;margin-bottom:22px;font-size:13.5px}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:middle;margin-right:4px}
 code{background:#2c2f37;padding:1px 5px;border-radius:5px;font-size:12.5px}
@@ -702,6 +766,10 @@ ${banner}
   ${card("avg session length", sessN > 0 ? dur(avgDur) : "&mdash;")}
   ${card("served into the demo", n(liveTotal), "button + direct + queue")}
 </div>
+
+<h2>How far visitors get</h2>
+<div class="funnel">${funnelRows}</div>
+<div class="grid" style="margin-top:12px">${engage}</div>
 
 <h2>Over time (hourly)</h2>
 ${chart("Slots free vs busy", `<span class="dot" style="background:#3a8a52"></span>free &nbsp; <span class="dot" style="background:#2563eb"></span>busy`, spark([{ values: free, color: "#3a8a52" }, { values: busy, color: "#2563eb" }]))}
