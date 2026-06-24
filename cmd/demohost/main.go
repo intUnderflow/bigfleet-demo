@@ -258,6 +258,53 @@ func (h *host) reap(s *session) {
 	_ = cmd.Run()
 }
 
+// sweepOrphans reaps clusters + run/ state left by a PREVIOUS demohost PID. Sessions live
+// only in h.sessions (in-memory), so on a fresh boot the map is empty and ANY kwokctl
+// cluster matching our per-session naming (<id>-cluster-a/b/c) or any run/sessions/<id>
+// dir is an unreachable zombie — the new demohost can never proxy to it. Without this, a
+// hard restart (launchd kickstart -k that outruns the SIGTERM reapAll) leaks the prior
+// life's clusters; they pile up as Docker containers until the Docker VM is exhausted and
+// every new session fails to create. Runs once at startup, before the warm pool, so the
+// fleet boots onto a clean substrate. Best-effort; reaps concurrently but bounded.
+func (h *host) sweepOrphans() {
+	ids := map[string]struct{}{}
+	if out, err := exec.Command("kwokctl", "get", "clusters").Output(); err == nil {
+		for _, ln := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			ln = strings.TrimSpace(ln)
+			for _, suf := range []string{"-cluster-a", "-cluster-b", "-cluster-c"} {
+				if strings.HasSuffix(ln, suf) {
+					ids[strings.TrimSuffix(ln, suf)] = struct{}{}
+				}
+			}
+		}
+	}
+	// Also catch sessions whose clusters already died but whose processes/ports/state linger.
+	if entries, err := os.ReadDir(filepath.Join(h.cfg.repo, "run", "sessions")); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "" {
+				ids[e.Name()] = struct{}{}
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	fmt.Printf("demohost: sweeping %d orphaned session(s) left by a previous run…\n", len(ids))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for id := range ids {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			h.reap(&session{ID: id})
+		}(id)
+	}
+	wg.Wait()
+	fmt.Println("demohost: orphan sweep complete")
+}
+
 // removeLocked drops a session from the registry and frees its port block.
 func (h *host) removeLocked(id string) {
 	if s, ok := h.sessions[id]; ok {
@@ -745,6 +792,11 @@ func serveMain(args []string) {
 	if err := build.Run(); err != nil {
 		die("demo-build.sh failed: " + err.Error())
 	}
+
+	// Reap any clusters/state leaked by a previous demohost PID before we start warming —
+	// a fresh boot has no live sessions, so they're all unreachable zombies hogging the
+	// Docker VM. (Without this, hard restarts pile up orphans until creates fail.)
+	h.sweepOrphans()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
