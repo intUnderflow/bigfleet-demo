@@ -1046,7 +1046,10 @@ func runScenario(ctx context.Context, clusters []cluster, name string) {
 			setTierReplicas(ctx, &clusters[i], "demand", d)
 		}
 		if !waitFor(ctx, 150*time.Second, func() bool {
-			return capNow().CloudInUse == 0 && clusterNodesNow(clusters[0].name) >= 14
+			// committed headroom for the reclaim — NOT cloud==0 (a heavy prior saturate can leave
+			// a node or two the engine hasn't consolidated; the reclaim's $0-ness is about B drawing
+			// freed COMMITTED, not the absolute cloud total).
+			return capNow().OnpremIdle >= 6 && clusterNodesNow(clusters[0].name) >= 14
 		}) {
 			return
 		}
@@ -1058,7 +1061,14 @@ func runScenario(ctx context.Context, clusters []cluster, name string) {
 		if !waitFor(ctx, 60*time.Second, func() bool { return clusterNodesNow(clusters[0].name) <= 16 }) {
 			return
 		}
-		pushFeed("➡ …and now spiking cluster-b: it grows from the committed capacity cluster-a just freed, drawn from the shared Idle pool — that capacity reused, NO new cloud spend ($/hr stays $0).")
+		// Claim the absolute "$/hr stays $0" only when it's actually true (the common from-rest
+		// path); after a prior saturate there may be residual cloud still draining, so then claim
+		// only what the MOVE itself does — provisions no new cloud (B reuses freed committed).
+		costLine := "the move itself provisions NO new cloud — cluster-b reuses cluster-a's freed committed capacity."
+		if capNow().CostPerHour == 0 {
+			costLine = "that capacity reused, NO new cloud spend ($/hr stays $0)."
+		}
+		pushFeed("➡ …and now cluster-b grows from the committed capacity cluster-a just freed, drawn from the shared Idle pool — " + costLine)
 		setTierReplicas(ctx, &clusters[1], "demand", 14)
 	}
 }
