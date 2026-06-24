@@ -469,7 +469,7 @@ function renderFleet(st){
     clouds.forEach(cl=>{ const n=(c.nodesByCloud||{})[cl]||0;
       tiles+=Array.from({length:n}).map(()=>`<div class="tile" style="background:${CLOUD_COLORS[cl]}"></div>`).join(''); });
     const bd=anyCrit?Math.max(0,c.batchPending||0):0, op=Math.max(0,(c.podsPending||0)-bd);
-    tiles+=Array.from({length:Math.min(bd,10)}).map(()=>`<div class="tile displaced" title="low-priority batch displaced to free the finite fleet for higher-priority work — waiting"></div>`).join('');
+    tiles+=Array.from({length:Math.min(bd,10)}).map(()=>`<div class="tile displaced" title="low-priority batch pod preempted (evicted from its node) to make room for critical work — now waiting"></div>`).join('');
     tiles+=Array.from({length:Math.min(op,10)}).map(()=>`<div class="tile prov" title="pods pending — BigFleet is provisioning capacity"></div>`).join('');
 
     const mix=clouds.filter(cl=>(c.nodesByCloud||{})[cl]).map(cl=>
@@ -480,10 +480,14 @@ function renderFleet(st){
     // Three distinct unit types, kept visually separate: NODES (capacity, the headline) →
     // DEMAND/critical (the levels you set) → PENDING/displaced PODS (the pressure signal,
     // only shown under load). 'running' pod count dropped — it dwarfed the capacity story.
-    const pend=Math.max(0,c.podsPending||0);
+    // batchPending is a SUBSET of podsPending in the data, so split them into two non-overlapping
+    // signals: 'preempted' = batch pods evicted to free nodes for critical work (had a node, lost
+    // it to priority); 'pending' = the REMAINING demand that never got placed because the finite
+    // fleet is full. preempted + pending = total unschedulable.
     const disp=(anyCrit&&(c.batchPending||0)>0)?c.batchPending:0;
+    const pend=Math.max(0,(c.podsPending||0)-disp);
     const pressure=(pend>0||disp>0)
-      ? `<div class="stat">${pend>0?`<span><b>${pend}</b> pod${pend===1?'':'s'} pending</span>`:''}${disp>0?`<span class="disp" title="low-priority batch pods the scheduler preempted to place critical work — waiting for capacity"><b>${disp}</b> batch pods displaced</span>`:''}</div>`
+      ? `<div class="stat">${pend>0?`<span title="demand the finite fleet has no room to place — never scheduled, waiting on capacity"><b>${pend}</b> pod${pend===1?'':'s'} pending</span>`:''}${disp>0?`<span class="disp" title="low-priority batch pods that were running and got PREEMPTED (evicted from their nodes) to make room for critical work — now waiting"><b>${disp}</b> batch preempted</span>`:''}</div>`
       : '';
     panel.innerHTML=
       `<h3><span>${c.name}</span><span class="nodes-badge"><b>${c.nodes}</b> node${c.nodes===1?'':'s'}</span></h3>
