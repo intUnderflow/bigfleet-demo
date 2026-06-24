@@ -55,6 +55,18 @@ const DEMO_URL = "https://bigfleet-demo.lucy.sh/"; // clean demo URL (no one-tim
 const V3_SITE_KEY = "6Lfu5zAtAAAAAO0Q7uXkJq7PlSHBOheVQnifOmzA";
 const V2_SITE_KEY = "6Lcd6TAtAAAAALGFd4ZKVX_WpFwUQoS6u7UtKDKc";
 
+// The BigFleet favicon (same six-rect fleet mark as bigfleet.lucy.sh). Served by the worker so
+// the front-door pages (gate/queue/stats) carry it without a session; the per-session UI ships
+// its own copy at ui/favicon.svg for direct runner access.
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="32" height="32" aria-label="BigFleet">
+  <rect x="6" y="20" width="14" height="14" rx="2" fill="#2563eb"/>
+  <rect x="25" y="14" width="14" height="14" rx="2" fill="#3b82f6"/>
+  <rect x="44" y="20" width="14" height="14" rx="2" fill="#60a5fa"/>
+  <rect x="6" y="40" width="14" height="14" rx="2" fill="#1d4ed8"/>
+  <rect x="25" y="34" width="14" height="14" rx="2" fill="#2563eb"/>
+  <rect x="44" y="40" width="14" height="14" rx="2" fill="#3b82f6"/>
+</svg>`;
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -64,6 +76,14 @@ export default {
     }
     if (url.pathname === "/stats") {
       return statsPage(env);
+    }
+    if (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") {
+      return new Response(FAVICON_SVG, {
+        headers: {
+          "content-type": "image/svg+xml",
+          "cache-control": "public, max-age=86400",
+        },
+      });
     }
 
     const ip = visitorIP(request);
@@ -406,6 +426,7 @@ function html(body: string, status = 200): Response {
 function gatePage(): string {
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <title>BigFleet — live demo</title>
 <script src="https://www.google.com/recaptcha/api.js?render=${V3_SITE_KEY}" async defer></script>
 <style>
@@ -712,6 +733,7 @@ function renderStats(d: {
 
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <title>BigFleet demo — usage stats</title>
 <style>
 :root{color-scheme:dark light}
