@@ -74,9 +74,6 @@
   .doc p{margin:0 0 10px;font-size:13.5px;color:var(--ink-2)}
   .doc .small{font-size:12.5px;color:var(--muted)}
   .doc b{color:#fff}
-  .callout{background:linear-gradient(180deg,rgba(37,99,235,.12),transparent);border:1px solid var(--accent);border-left:3px solid var(--accent);border-radius:10px;padding:13px 15px;margin:0 0 22px;font-size:13.5px;line-height:1.55;color:var(--ink-2)}
-  .callout b{color:#fff}
-  .callout .cnote{display:block;margin-top:6px;font-size:11.5px;color:var(--muted)}
   .actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 2px}
   .action{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 13px;
     font-size:13px;font-weight:600;cursor:pointer}
@@ -199,13 +196,13 @@
 
       <section>
         <h2><span class="n">1</span>Not another cluster autoscaler</h2>
-        <p>Cluster Autoscaler and Karpenter grow <b>one cluster</b> by bolting nodes onto it — each scales itself in isolation, so capacity sits stranded in whichever cluster happens to own it while a neighbour starves. The per-cluster <b>buffer tax</b> is what those islands cost you: with nothing to rebalance them, every cluster parks its <b>own idle-node buffer</b> against its own worst case — headroom standing idle in <i>every</i> cluster. BigFleet is the missing rebalancer. <b>Within one shard</b> — the boundary it manages, here three clusters — it decouples capacity from cluster identity through a shared <b>Idle</b> hub, so the islands fuse into <b>one fungible pool</b>: idle capacity in one cluster serves demand in another (the <b>move</b>, §3), low-priority work is preempted under scarcity (<b>preemption</b>, §4), and you hold <b>one shared buffer for the whole shard, not one per cluster</b>. Same payoff, three ways — the islands rebalanced.</p>
+        <p>Cluster Autoscaler and Karpenter are per-cluster by design — which is why you get islands, and why you also pay the <b>buffer tax</b>: every cluster parks its own idle-node buffer against its own worst case, headroom standing idle in <i>every</i> cluster. BigFleet works a level up. <b>Within one shard</b> — the boundary it manages, here three clusters — it treats those clusters&rsquo; nodes as <b>one shared pool</b>, and that single capability shows up three ways: idle capacity serves another cluster&rsquo;s demand (the <b>move</b>, §3), low-priority work is preempted under scarcity (<b>preemption</b>, §4), and you keep <b>one shared buffer for the shard, not one per cluster</b>. Same idea, three payoffs.</p>
         <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated kwok cloud.</p>
       </section>
 
       <section>
         <h2><span class="n">2</span>Your fleet — three clusters, one finite pool</h2>
-        <p>On the right: three <b>real Kubernetes clusters</b> — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b> — drawing on <b>one shared, finite pool</b> of machines. They&rsquo;re already busy — running batch across the fleet plus a production workload on <b>cluster-a</b> — all packed onto already-paid-for <b>committed</b> capacity at <b>$0/hr</b> (no on-demand cloud running). The pool can&rsquo;t grow past its ceiling, which is exactly why <i>moving</i> capacity between clusters is the whole game. That idle slice of committed capacity sitting ready — the <b>&ldquo;Shared buffer&rdquo;</b> on the scoreboard — <i>is</i> the fleet&rsquo;s burst buffer — held <b>once</b> for the fleet and re-bindable to whichever cluster bursts next through the shard&rsquo;s shared <b>Idle</b> hub (a multi-step move, not instant).</p>
+        <p>On the right: three <b>real Kubernetes clusters</b> — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b> — drawing on <b>one shared, finite pool</b> of machines. They&rsquo;re already busy — running batch across the fleet plus a production workload on <b>cluster-a</b> — all packed onto already-paid-for <b>committed</b> capacity at <b>$0/hr</b> (no on-demand cloud running). The pool can&rsquo;t grow past its ceiling, which is exactly why <i>moving</i> capacity between clusters is the whole game. That idle slice of committed capacity sitting ready — the <b>&ldquo;Shared buffer&rdquo;</b> on the scoreboard — <i>is</i> the shard&rsquo;s burst buffer: held <b>once</b>, re-bindable to whichever cluster bursts next (a multi-step move, not instant).</p>
       </section>
 
       <section>
@@ -217,8 +214,6 @@
         </div>
         <p class="small">This cross-cluster move is BigFleet&rsquo;s <b>real</b> control logic running against a simulated cloud. <i>You</i> changed the demand on both sides; BigFleet only reacts — as cluster-A&rsquo;s demand falls it reclaims A&rsquo;s freed nodes into the shard&rsquo;s shared <b>Idle</b> pool, then reuses that committed hardware for cluster-B rather than bursting new cloud. It genuinely <i>reasons about</i> cost (the dollar figures are illustrative constants, not quotes). The wait you watch — cluster-A&rsquo;s production draining, then cluster-B&rsquo;s nodes coming up — is a <b>simulated dwell</b>, not a measured transfer time: BigFleet&rsquo;s real decision, transfer speed simulated.</p>
       </section>
-
-      <div class="callout"><b>The pooled buffer, in one line:</b> a per-cluster autoscaler makes you park idle nodes in <i>every</i> cluster, just in case. BigFleet pools that into <b>one shared committed buffer</b> — idle hardware flows to whichever cluster needs it next through the shard&rsquo;s single Idle hub. One buffer for the shard, not one per cluster (it still holds a buffer &mdash; just one, shared). <span class="cnote">BigFleet&rsquo;s real decision; transfer speed simulated.</span></div>
 
       <section>
         <h2><span class="n">4</span>A full fleet → preemption across the fleet</h2>
