@@ -191,12 +191,12 @@
   <div class="layout">
     <!-- LEFT: the guided tutorial -->
     <aside class="doc">
-      <h1>One cluster starves while another sits idle</h1>
-      <p class="lede">That&rsquo;s capacity <b>trapped in per-cluster islands</b> — each cluster scales itself, so the one starving can&rsquo;t borrow from the one sitting idle, and a per-cluster autoscaler has <b>no mechanism to rebalance</b> them. <b>BigFleet</b> is that missing mechanism: a fleet-level autoscaler that drains a node out of the idle cluster and bootstraps it into the starved one. Press the buttons; the fleet on the right reacts in real time — watch it rebalance the islands, on the <b>real engine</b>.</p>
+      <h1>BigFleet: one pool of capacity, shared across your clusters</h1>
+      <p class="lede">A live, interactive demo of <b>BigFleet</b>, a fleet-level Kubernetes autoscaler. Each cluster scales itself today, so capacity gets stranded in per-cluster <b>islands</b> — one cluster starved for nodes while another sits idle, with no way to shift between them. BigFleet pools them and moves capacity to where it&rsquo;s needed. Press the buttons on the left; the fleet on the right reacts in real time.</p>
 
       <section>
         <h2><span class="n">1</span>Not another cluster autoscaler</h2>
-        <p>Cluster Autoscaler and Karpenter are per-cluster by design — which is why you get islands, and why you also pay the <b>buffer tax</b>: every cluster parks its own idle-node buffer against its own worst case, headroom standing idle in <i>every</i> cluster. BigFleet works a level up. <b>Within one shard</b> — the boundary it manages, here three clusters — it treats those clusters&rsquo; nodes as <b>one shared pool</b>, and that single capability shows up three ways: idle capacity serves another cluster&rsquo;s demand (the <b>move</b>, §3), low-priority work is preempted under scarcity (<b>preemption</b>, §4), and you keep <b>one shared buffer for the shard, not one per cluster</b>. Same idea, three payoffs.</p>
+        <p>Cluster Autoscaler and Karpenter are per-cluster — and on top of the islands, they make you pay the <b>buffer tax</b>: every cluster parks its own idle-node buffer against its own worst case, headroom standing idle in <i>every</i> cluster. BigFleet works a level up. <b>Within one shard</b> — the boundary it manages, here three clusters — it treats those clusters&rsquo; nodes as <b>one shared pool</b>, and that single capability shows up three ways: idle capacity serves another cluster&rsquo;s demand (the <b>move</b>, §3), low-priority work is preempted under scarcity (<b>preemption</b>, §4), and you keep <b>one shared buffer for the shard, not one per cluster</b>. Same idea, three payoffs.</p>
         <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated kwok cloud.</p>
       </section>
 
