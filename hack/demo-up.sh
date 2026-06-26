@@ -29,15 +29,33 @@ log "starting fakecloud provider (3 real providerkit backends — on-prem/AWS/GC
 start fakecloud.log "$BIN/fakecloud-provider" --addr "$PROVIDER_LISTEN"
 sleep 1
 
+# Fleet-dashboard stack (only when DASHBOARDS=1 AND the dashboard binary was built): a single-node
+# coordinator the shard registers with, so the real bigfleet-web-dashboard can show this session's
+# fleet. NON-load-bearing — the shard "must stay alive and ready with zero coordinators"
+# (--coordinator-addr Empty disables), so this can't destabilise the core stack.
+COORD_ARGS=""
+if [ "$DASHBOARDS" = "1" ] && [ -x "$BIN/bigfleet-web-dashboard" ]; then
+  log "starting single-node coordinator (Raft+BoltDB; the dashboard reads it for topology / per-shard providers / needs)"
+  start coordinator.log "$BIN/shard" coordinator --bootstrap \
+    --listen="$COORD_LISTEN" --raft-bind="$COORD_RAFT" \
+    --metrics-addr="$COORD_METRICS" --data-dir="$COORD_DATA"
+  sleep 1
+  # the shard self-reports its --provider-addr to the coordinator on every ReportShard (ShardSummary.provider_address),
+  # which is how the dashboard's per-shard Providers view populates — no separate provider registration.
+  COORD_ARGS="--coordinator-addr=$COORD_LISTEN --advertise-addr=$SHARD_LISTEN"
+fi
+
 log "starting shard (dials the fakecloud provider — declares BareMetal+Reserved committed + OnDemand+Spot elastic = $FLEET_SIZE)"
 # --execute-concurrency: parallel provisioning is safe since BigFleet ADR-0058 keyed the
 # kit's fence high-water mark per (shard, machine). Before that, a single shard's concurrent
 # execute workers fenced each other (out-of-order seqs against one per-shard mark) and machines
 # landed in FAILED, which forced =1 (serial, gradual). Now concurrent ops on different machines
 # don't fence, so we run a wide pool to keep a 120-node burst snappy.
+# COORD_ARGS is unquoted on purpose (the flags carry no spaces) so it splices in or vanishes cleanly.
 start shard.log "$BIN/shard" shard \
   --provider-addr="$PROVIDER_LISTEN" --execute-concurrency=16 \
-  --listen="$SHARD_LISTEN" --metrics-addr="$SHARD_METRICS" --data-dir="$RUN/shard-data"
+  --listen="$SHARD_LISTEN" --metrics-addr="$SHARD_METRICS" --data-dir="$RUN/shard-data" \
+  $COORD_ARGS
 sleep 2
 
 for c in "${CLUSTERS[@]}"; do
@@ -60,10 +78,19 @@ else
   : > "$RUN/dashboards"
 fi
 
+# the REAL bigfleet-web-dashboard (read-only) for this session, pointed at the coordinator +
+# a per-session Prometheus + the 3 clusters' CRDs — proves it's the real BigFleet engine.
+: > "$RUN/bigfleet-dashboard"
+if [ "$DASHBOARDS" = "1" ] && [ -x "$BIN/bigfleet-web-dashboard" ]; then
+  bash "$HACK_DIR/demo-fleet-dashboard.sh" || true
+fi
+
 # session descriptor for the backend
 {
   echo "{"
   echo "  \"shardMetrics\": \"$SHARD_METRICS\","
+  bfdash=$(cat "$RUN/bigfleet-dashboard" 2>/dev/null || true)
+  echo "  \"bigfleetDashboard\": \"$bfdash\","
   echo "  \"workspaces\": ["
   for idx in "${!CLUSTERS[@]}"; do
     c="${CLUSTERS[$idx]}"; comma=","; [ "$idx" -eq $(( ${#CLUSTERS[@]} - 1 )) ] && comma=""

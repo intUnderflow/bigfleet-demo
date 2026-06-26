@@ -31,9 +31,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,8 +42,9 @@ import (
 )
 
 type session struct {
-	ShardMetrics string `json:"shardMetrics"`
-	Workspaces   []struct {
+	ShardMetrics      string `json:"shardMetrics"`
+	BigfleetDashboard string `json:"bigfleetDashboard"` // localhost URL of the per-session bigfleet-web-dashboard ("" if disabled)
+	Workspaces        []struct {
 		Name       string `json:"name"`
 		Kubeconfig string `json:"kubeconfig"`
 		Dashboard  string `json:"dashboard"`
@@ -59,22 +60,23 @@ type clusterState struct {
 	PodsRunning  int            `json:"podsRunning"`
 	PodsPending  int            `json:"podsPending"`
 	BatchPending int            `json:"batchPending"` // pending low-priority BATCH pods — the preemption victim under scarcity (§4)
-	Demand       int            `json:"demand"`    // standard demand-tier pods (user-controlled)
-	Critical     int            `json:"critical"`  // critical demand-tier pods (section 4)
-	Baseline     int            `json:"baseline"`  // baseline-tier pods (pre-loaded)
-	Dashboard    string         `json:"dashboard"` // URL of this cluster's Kubernetes dashboard
+	Demand       int            `json:"demand"`       // standard demand-tier pods (user-controlled)
+	Critical     int            `json:"critical"`     // critical demand-tier pods (section 4)
+	Baseline     int            `json:"baseline"`     // baseline-tier pods (pre-loaded)
+	Dashboard    string         `json:"dashboard"`    // URL of this cluster's Kubernetes dashboard
 }
 
 type fleetState struct {
-	Clusters     []clusterState `json:"clusters"`
-	Shard        map[string]int `json:"shard"`        // bootstrap/provision/reclaim/preempt action counters (for the feed)
-	FleetByCloud map[string]int `json:"fleetByCloud"` // READY nodes per provider across the whole fleet (On-prem/GCP/AWS)
-	Clouds       []string       `json:"clouds"`       // stable display order of the providers in the fleet
-	FleetSize    int            `json:"fleetSize"`    // total machines in the finite fleet (hard cap = owned + cloud quota)
-	Capacity     capacity       `json:"capacity"`     // the two-tier owned/cloud split + illustrative cost
-	Scenario     string         `json:"scenario"`     // running teaching scenario (move|saturate|critical), "" if none
-	Feed         []string       `json:"feed"`
-	TS           string         `json:"ts"`
+	Clusters       []clusterState `json:"clusters"`
+	Shard          map[string]int `json:"shard"`        // bootstrap/provision/reclaim/preempt action counters (for the feed)
+	FleetByCloud   map[string]int `json:"fleetByCloud"` // READY nodes per provider across the whole fleet (On-prem/GCP/AWS)
+	Clouds         []string       `json:"clouds"`       // stable display order of the providers in the fleet
+	FleetSize      int            `json:"fleetSize"`    // total machines in the finite fleet (hard cap = owned + cloud quota)
+	Capacity       capacity       `json:"capacity"`     // the two-tier owned/cloud split + illustrative cost
+	Scenario       string         `json:"scenario"`     // running teaching scenario (move|saturate|critical), "" if none
+	Feed           []string       `json:"feed"`
+	TS             string         `json:"ts"`
+	FleetDashboard string         `json:"fleetDashboard"` // "/fleet-dash/" when the real bigfleet-web-dashboard is wired this session, else ""
 }
 
 // capacity is the honest two-tier view: COMMITTED ($0 marginal — owned on-prem bare
@@ -159,12 +161,12 @@ type cluster struct {
 }
 
 var (
-	mu             sync.Mutex
-	feed           []string
-	prev           = map[string]int{}
-	prevNodes      = map[string]int{}
-	prevBatch      = map[string]int{} // per-cluster batch POD count (for scheduler-preemption detection)
-	feedPrimed     bool               // first poll seeds prev/prevNodes silently (avoids diffing cumulative counters against 0 on backend restart)
+	mu         sync.Mutex
+	feed       []string
+	prev       = map[string]int{}
+	prevNodes  = map[string]int{}
+	prevBatch  = map[string]int{} // per-cluster batch POD count (for scheduler-preemption detection)
+	feedPrimed bool               // first poll seeds prev/prevNodes silently (avoids diffing cumulative counters against 0 on backend restart)
 )
 
 type dashMount struct{ prefix, target, token string }
@@ -419,6 +421,15 @@ func main() {
 		clusters = append(clusters, cluster{name: w.Name, c: c, dashboard: dashURL})
 	}
 
+	// The real bigfleet-web-dashboard for this session (read-only), mounted under /fleet-dash/.
+	// Its UI is built with BASE_PATH=/fleet-dash/ (root-absolute asset/api paths) and dashHandler
+	// is a prefix-stripping proxy, so the dashboard's own server still sees root /api + /assets;
+	// the base-href injection is an inert no-op against absolute paths. Only :8090 is ever exposed.
+	if sess.BigfleetDashboard != "" {
+		dashMounts = append(dashMounts, dashMount{prefix: "/fleet-dash", target: sess.BigfleetDashboard, token: ""})
+		fmt.Printf("demo-backend: bigfleet dashboard -> /fleet-dash/ (%s)\n", sess.BigfleetDashboard)
+	}
+
 	fmt.Printf("demo-backend: opening BUSY — baseline %d/cluster + cluster-a donor demand %d, all on committed ($0)\n", *baseline, *donorDemand)
 	seedBusyFleet(clusters, *baseline, *donorDemand)
 
@@ -573,6 +584,9 @@ func pollLoop(sess session, clusters []cluster, hub *hub, fleetSize int, cfg cap
 		scenMu.Lock()
 		st.Scenario = curScenario
 		scenMu.Unlock()
+		if sess.BigfleetDashboard != "" {
+			st.FleetDashboard = "/fleet-dash/" // the relative, tunnel-safe path the §8 button opens
+		}
 		setLatest(st)
 		synthesizeFeed(&st)
 		hub.broadcast(st)
@@ -712,9 +726,11 @@ func scrapeShard(addr string) map[string]int {
 // namespace, so the dashboard's Workloads/Pods views look like a real platform and
 // the stock scheduler handles priority + native preemption (and the ReplicaSet
 // recreates preempted pods as Pending — no recreation hack needed):
-//   baseline (PriorityClass "batch",    ns "batch")      — best-effort, preemptible.
-//   demand   (PriorityClass "critical", ns "production") — what the visitor drives;
-//                                                          under saturation it preempts batch.
+//
+//	baseline (PriorityClass "batch",    ns "batch")      — best-effort, preemptible.
+//	demand   (PriorityClass "critical", ns "production") — what the visitor drives;
+//	                                                       under saturation it preempts batch.
+//
 // The visitor's "demand level" is a total replica count, spread across the tier's
 // service Deployments.
 // Three tiers: baseline batch (preemptible filler), demand (standard production —
@@ -764,7 +780,7 @@ var svcSize = map[string]podSize{
 	"api-gateway": sizeMedium, "search": sizeLarge, "inventory": sizeSmall,
 	"user-auth": sizeSmall, "recommendations": sizeMedium, "cart-service": sizeSmall,
 	"order-processor": sizeLarge,
-	"etl-pipeline": sizeLarge, "ml-training": sizeLarge, "analytics-rollup": sizeMedium,
+	"etl-pipeline":    sizeLarge, "ml-training": sizeLarge, "analytics-rollup": sizeMedium,
 	"data-export": sizeSmall, "log-archival": sizeSmall, "nightly-report": sizeMedium,
 	"backup-runner": sizeSmall, "clickstream-agg": sizeMedium,
 }
@@ -1293,8 +1309,23 @@ func findCluster(cs []cluster, name string) *cluster {
 	return nil
 }
 func atoi(s string) int { f, _ := strconv.ParseFloat(s, 64); return int(f) }
-func clamp(v, lo, hi int) int { if v < lo { return lo }; if v > hi { return hi }; return v }
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 func int32p(v int32) *int32 { return &v }
 func int64p(v int64) *int64 { return &v }
-func must(err error) { if err != nil { die("scheme", err) } }
-func die(what string, err error) { fmt.Fprintf(os.Stderr, "demo-backend: %s: %v\n", what, err); os.Exit(1) }
+func must(err error) {
+	if err != nil {
+		die("scheme", err)
+	}
+}
+func die(what string, err error) {
+	fmt.Fprintf(os.Stderr, "demo-backend: %s: %v\n", what, err)
+	os.Exit(1)
+}

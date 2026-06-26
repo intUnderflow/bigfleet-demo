@@ -10,9 +10,11 @@ fi
 # NEVER do this when SESSION_ID is set: sessions share the bin/ dir, so a broad pkill
 # would tear down sibling sessions. There, $RUN/pids is the authoritative process list.
 if [ -z "$SESSION_ID" ]; then
-  for b in node-creator fakecloud-provider shard operator upc demo-backend; do
+  # bin/shard matches BOTH the shard and the coordinator (both are `bin/shard <subcmd>`).
+  for b in node-creator fakecloud-provider shard operator upc demo-backend bigfleet-web-dashboard; do
     pkill -f "bin/$b" 2>/dev/null || true
   done
+  pkill -f "config.file=$RUN/prometheus.yml" 2>/dev/null || true
 fi
 # stop the per-cluster dashboards + delete the real clusters (kwokctl removes their
 # containers) — by GLOBAL name so only THIS session's clusters/containers are removed.

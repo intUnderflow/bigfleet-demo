@@ -25,7 +25,7 @@ func parseServeFlags(args []string) (config, string, bool) {
 	fs.IntVar(&c.stride, "port-stride", 16, "ports reserved per session")
 	fs.IntVar(&c.maxSessions, "max-sessions", 8, "hard cap on concurrent sessions (backstop)")
 	fs.IntVar(&c.demoBudgetMB, "demo-memory-mb", 16384, "TOTAL memory reserved to demo sessions (MB) — admission never exceeds this")
-	fs.IntVar(&c.sessionMB, "session-memory-mb", 2048, "memory reserved per session (MB); measured ~1.9 GB/session on the dev Mac")
+	fs.IntVar(&c.sessionMB, "session-memory-mb", 2304, "memory reserved per session (MB); measured ~2.05-2.2 GB/session (incl. the read-only BigFleet dashboard stack: coordinator + Prometheus + dashboard, ~+200 MB)")
 	fs.DurationVar(&c.ttl, "session-ttl", time.Hour, "hard session lifetime")
 	fs.DurationVar(&c.idle, "idle-timeout", 5*time.Minute, "reap a session this long after its tab stops heart-beating")
 	fs.BoolVar(&c.dashboards, "dashboards", false, "run per-cluster k8s dashboards in each session (heavier)")

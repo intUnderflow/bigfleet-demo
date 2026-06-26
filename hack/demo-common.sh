@@ -45,12 +45,25 @@ if [ -n "$PORT_BASE" ]; then
   SHARD_METRICS="127.0.0.1:$((PORT_BASE+2))"
   PROVIDER_LISTEN="127.0.0.1:$((PORT_BASE+3))"
   DASH_PORT_BASE=$((PORT_BASE+5))
+  # fleet-dashboard stack (the real bigfleet-web-dashboard + its coordinator + Prometheus),
+  # all in the free upper half of the 16-port block (+0..+3,+5..+7 are the core stack).
+  COORD_LISTEN="127.0.0.1:$((PORT_BASE+8))"
+  COORD_RAFT="127.0.0.1:$((PORT_BASE+9))"
+  COORD_METRICS="127.0.0.1:$((PORT_BASE+10))"
+  PROM_PORT=$((PORT_BASE+11))
+  FLEETDASH_PORT=$((PORT_BASE+12))
 else
   SHARD_LISTEN="127.0.0.1:17780"
   SHARD_METRICS="127.0.0.1:18799"
   PROVIDER_LISTEN="127.0.0.1:19090"  # the fakecloud three-cloud CapacityProvider the shard dials
   DASH_PORT_BASE=9101
+  COORD_LISTEN="127.0.0.1:17790"
+  COORD_RAFT="127.0.0.1:17791"
+  COORD_METRICS="127.0.0.1:18790"
+  PROM_PORT=19091
+  FLEETDASH_PORT=18081
 fi
+COORD_DATA="$RUN/coord-data"
 
 # Two-tier finite fleet (see scenarios/demo-fleet.yaml):
 #   ONPREM_SIZE = owned bare-metal Idle pool (--seed-machines): always-on, $0 marginal.
@@ -111,6 +124,35 @@ build_bins(){
     go build -o "$BIN/shard"    ./cmd/bigfleet
     go build -o "$BIN/operator" ./cmd/operator
     go build -o "$BIN/upc"      ./cmd/bigfleet-unschedulable-pod-controller )
+  build_fleet_dashboard
+}
+
+# build_fleet_dashboard builds the out-of-tree bigfleet-web-dashboard ONCE (its UI baked with
+# the /fleet-dash/ reverse-proxy prefix) into $BIN. Best-effort: a host without the dashboard
+# checkout or npm just skips it and the session runs without the fleet dashboard (demo-up.sh and
+# demo-fleet-dashboard.sh both gate on $BIN/bigfleet-web-dashboard existing). The dashboard links
+# the coordinator/shard-read protos from a sibling ../bigfleet (its go.mod `replace`), so we pin
+# that sibling to the SAME bigfleet revision the demo's engine uses to avoid gRPC contract skew,
+# and force the demo's Go toolchain so the shared build cache doesn't clash.
+build_fleet_dashboard(){
+  local dash="${BIGFLEET_DASHBOARD_DIR:-$(cd "$REPO_ROOT/.." 2>/dev/null && pwd)/bigfleet-web-dashboard}"
+  [ -d "$dash" ] || { log "fleet-dash build: $dash absent — skipping (no BigFleet dashboard this run)"; return 0; }
+  command -v npm >/dev/null 2>&1 || { log "fleet-dash build: npm not found — skipping"; return 0; }
+  local bfsha gotc bf
+  bfsha=$(grep -oE "intUnderflow/bigfleet v[0-9][^ ]*-[0-9a-f]{12}" "$REPO_ROOT/go.mod" | grep -oE "[0-9a-f]{12}$" | head -1)
+  gotc="go$(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
+  bf="$(cd "$dash/.." 2>/dev/null && pwd)/bigfleet"
+  if [ -d "$bf/.git" ] && [ -n "$bfsha" ]; then
+    ( cd "$bf" && git fetch -q --all 2>/dev/null; git checkout -q "$bfsha" 2>/dev/null ) \
+      || log "fleet-dash build: could not pin $bf to $bfsha (proto may skew)"
+  fi
+  log "building bigfleet-web-dashboard (BASE_PATH=/fleet-dash/, engine ${bfsha:-?}, $gotc) -> $BIN/bigfleet-web-dashboard"
+  if ( cd "$dash" && GOTOOLCHAIN="$gotc" BASE_PATH=/fleet-dash/ make build >/dev/null 2>&1 ) \
+     && [ -x "$dash/bin/bigfleet-web-dashboard" ]; then
+    cp "$dash/bin/bigfleet-web-dashboard" "$BIN/bigfleet-web-dashboard"
+  else
+    log "fleet-dash build FAILED — session runs without the BigFleet dashboard (non-fatal)"
+  fi
 }
 
 # create_cluster <name>: a real kwokctl cluster + BigFleet CRDs + PriorityClasses +

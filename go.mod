@@ -12,7 +12,7 @@ go 1.26.4
 // @<commit>). For local engine development, add a gitignored go.work
 // (`go work init . ../bigfleet ../bigfleet-providers`).
 require (
-	github.com/intUnderflow/bigfleet v0.0.0-20260623141537-3d0afdfba265
+	github.com/intUnderflow/bigfleet v0.0.0-20260626110112-d5bb282bd402
 	github.com/intUnderflow/bigfleet-providers v0.1.1-0.20260623133353-eaaa5830051a
 	google.golang.org/grpc v1.80.0
 	k8s.io/api v0.36.2

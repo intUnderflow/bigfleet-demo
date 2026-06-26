@@ -42,8 +42,8 @@ github.com/google/pprof v0.0.0-20250403155104-27863c87afa6 h1:BHT72Gu3keYf3ZEu2J
 github.com/google/pprof v0.0.0-20250403155104-27863c87afa6/go.mod h1:boTsfXsheKC2y+lKOCMpSfarhxDeIzfZG1jqGcPl3cA=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/intUnderflow/bigfleet v0.0.0-20260623141537-3d0afdfba265 h1:I3UEsD130SlRCQc1Uxhn7w8Ck/iOfmmY2LDwT0se8go=
-github.com/intUnderflow/bigfleet v0.0.0-20260623141537-3d0afdfba265/go.mod h1:79iTvJc2isdrrBTf6ZHg+F4I4j1YmRNAUY1BsX6sOj8=
+github.com/intUnderflow/bigfleet v0.0.0-20260626110112-d5bb282bd402 h1:A+A0RMCbUyBOp4Zo/UNEn3dYhwqXzWBZDYpN3nOrB0I=
+github.com/intUnderflow/bigfleet v0.0.0-20260626110112-d5bb282bd402/go.mod h1:79iTvJc2isdrrBTf6ZHg+F4I4j1YmRNAUY1BsX6sOj8=
 github.com/intUnderflow/bigfleet-providers v0.1.1-0.20260623133353-eaaa5830051a h1:yIH4FrvuHN7LRJhp1sKHpsv4Ysxd9Ul2gGPg26BqtCs=
 github.com/intUnderflow/bigfleet-providers v0.1.1-0.20260623133353-eaaa5830051a/go.mod h1:xGkyjRcrLzeqCFmSrphBfxWeXuwOTQpDtq/BPjF7ifI=
 github.com/josharian/intern v1.0.0 h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=

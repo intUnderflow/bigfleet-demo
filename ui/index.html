@@ -253,11 +253,13 @@
       </section>
 
       <section>
-        <h2><span class="n">8</span>Prove the clusters are real</h2>
-        <p>Each cluster is a genuine Kubernetes cluster — a real apiserver, the stock <b>kube-scheduler</b>, and real controllers. Open its <b>official Kubernetes dashboard</b> (opens in a new tab) and you&rsquo;ll see the nodes BigFleet provisioned — committed on-prem <code>bm-dc1-…</code> boxes alongside cloud <code>gke-…</code> / <code>ip-10-…</code> instances tagged <code>bigfleet.demo/billing: on-demand</code> or <code>spot</code>, with their zones and regions. The nodes are <b>kwok-simulated</b> (tagged <code>bigfleet.demo/simulated</code>, <code>kwok://</code> providerID) — only the cloud is fake, never the control plane.</p>
-        <p class="small">And the capacity itself flows through <b>real providers</b>: the shard provisions every node by calling three out-of-tree <code>CapacityProvider</code> backends (on-prem / AWS / GCP) over the genuine six-RPC <code>providerkit</code> contract — the same contract a real cloud provider implements, <b>conformance-certified</b> (<code>core,cloud,spot</code>). The spot-vs-on-demand tier you see on each node is BigFleet&rsquo;s real effective-cost decision read back from what the provider declared, not a label the demo painted on.</p>
+        <h2><span class="n">8</span>Prove it&rsquo;s real — real clusters, real BigFleet</h2>
+        <p>Each cluster is a genuine Kubernetes cluster — a real apiserver, the stock <b>kube-scheduler</b>, real controllers. Open its <b>official Kubernetes dashboard</b> and you&rsquo;ll see the nodes BigFleet provisioned — committed on-prem <code>bm-dc1-…</code> boxes alongside cloud <code>gke-…</code> / <code>ip-10-…</code> instances tagged <code>bigfleet.demo/billing: on-demand</code> or <code>spot</code>. The nodes are <b>kwok-simulated</b> (<code>bigfleet.demo/simulated</code>, <code>kwok://</code> providerID) — only the cloud is fake, never the control plane.</p>
+        <p>And the <i>engine</i> is real too: open <b>BigFleet&rsquo;s own dashboard</b> — the actual product UI, <b>read-only</b> — pointed at <b>this session&rsquo;s</b> live shard, coordinator and clusters. It reads genuine control-plane telemetry: the shard&rsquo;s machine inventory and assign/preempt/reclaim decisions (from its Prometheus metrics), the coordinator&rsquo;s fleet topology, the per-shard provider it dials, and the capacity requests on each cluster. Nothing in it is staged for the demo.</p>
+        <p class="small">The capacity flows through <b>real providers</b> — three out-of-tree <code>CapacityProvider</code> backends (on-prem / AWS / GCP) over the genuine six-RPC <code>providerkit</code> contract, <b>conformance-certified</b> (<code>core,cloud,spot</code>); the spot-vs-on-demand tier on each node is BigFleet&rsquo;s real effective-cost decision read back from the provider, not a label we painted. In the BigFleet dashboard the <b>$ figures are the same illustrative constants</b>, and there are no real CPU/memory <i>usage</i> numbers (kwok runs pods at their request) — the engine&rsquo;s decisions are real, the cloud underneath is simulated.</p>
         <div class="actions">
-          <button class="action ghost" onclick="openDash('cluster-a')">⎈ Open cluster-A dashboard</button>
+          <button class="action ghost" id="fleet-dash-btn" onclick="openFleetDash()">⎈ Open BigFleet&rsquo;s dashboard (read-only)</button>
+          <button class="action ghost" onclick="openDash('cluster-a')">⎈ cluster-A k8s dashboard</button>
           <button class="action ghost" onclick="openDash('cluster-b')">⎈ cluster-B</button>
           <button class="action ghost" onclick="openDash('cluster-c')">⎈ cluster-C</button>
         </div>
@@ -332,7 +334,7 @@ function initFunnel(){ if(_funnelInit)return; _funnelInit=true; track('landed');
       var nEl=e.target.querySelector('h2 .n'); if(nEl) track('section:'+nEl.textContent.trim()); } }); },{threshold:0.5});
     document.querySelectorAll('section').forEach(function(s){ if(s.querySelector('h2 .n')) io.observe(s); });
   } }
-function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); syncScenarioButtons(st); initFunnel(); }
+function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); syncScenarioButtons(st); initFunnel(); const fdb=document.getElementById('fleet-dash-btn'); if(fdb) fdb.style.display=st.fleetDashboard?'':'none'; }
 
 // While a scenario runs it self-establishes its precondition over tens of seconds; disable the
 // other triggers so a mis-click can't silently abandon it. Reset stays live (to cancel).
@@ -522,6 +524,7 @@ function setDemand(ws,level,tier){ track('act:demand'); post('/api/demand',{work
 function scenario(name){ track('act:scenario'); track('act:scenario:'+name); post('/api/scenario',{name:name}); }
 function resetDemo(){ post('/api/reset',{}); }
 function openDash(ws){ track('act:dashboard'); const c=(last.clusters||[]).find(x=>x.name===ws); if(c&&c.dashboard){ window.open(c.dashboard,'_blank'); } else { alert('dashboard for '+ws+' is still starting — try again in a moment'); } }
+function openFleetDash(){ track('act:fleet-dashboard'); if(last&&last.fleetDashboard){ window.open(last.fleetDashboard,'_blank'); } else { alert('BigFleet&rsquo;s dashboard is still starting — try again in a moment'); } }
 function post(u,b){ fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); }
 
 // ── Hosted-session clock ─────────────────────────────────────────────────────
