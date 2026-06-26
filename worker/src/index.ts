@@ -12,7 +12,7 @@
  *     low shows a reCAPTCHA v2 checkbox. Passing either earns a live session; and if the
  *     fleet is FULL, a passed visitor joins a FIFO queue (with a live position and a tour
  *     link) instead of being turned away — they're dropped straight in when a slot frees,
- *     and lose their place if they stop polling for ~2 minutes.
+ *     and lose their place if they stop polling for ~3 minutes.
  *
  * Once assigned, the visitor (keyed by IP) is reverse-proxied to their session until it
  * ends; ending sends them back to the front door rather than silently minting another slot.
@@ -46,7 +46,7 @@ interface Assignment {
 
 const KV_PREFIX = "ip:";
 const QUEUE_PREFIX = "q:"; // q:<ip> -> {joinedAt}; metadata.joinedAt orders the FIFO line
-const QUEUE_TTL = 130; // seconds: a queued visitor who stops polling for ~2min loses their place
+const QUEUE_TTL = 180; // seconds: a queued visitor who stops polling for ~3min loses their place (>3x the 45s poll, so a missed beat never drops them)
 const HOME_URL = "https://bigfleet.lucy.sh/"; // front door — re-enter the demo through the gate
 const TOUR_URL = "https://bigfleet.lucy.sh/demo"; // the static, always-available terminal tour
 const DEMO_URL = "https://bigfleet-demo.lucy.sh/"; // clean demo URL (no one-time token)
@@ -119,6 +119,8 @@ export default {
         return Response.redirect(TOUR_URL, 302);
       }
       await writeAssignment(env, kvKey, fresh);
+      await queueLeave(env, ip); // clear any stale q: ticket (mirrors handleGate) so a direct-nav
+      // visitor who clicked the homepage Demo button while queued leaves no phantom queue entry
       recordOutcome(env, "demo", "home", "");
       return Response.redirect(DEMO_URL, 302);
     }
@@ -142,8 +144,11 @@ export default {
     return html(gatePage());
   },
 
-  // Cron (every 5 min): snapshot capacity + queue depth, and scrape each runner's finished
-  // sessions, into the Analytics Engine time-series the /stats page reads.
+  // Cron (every 15 min): snapshot capacity + queue depth, and scrape each runner's finished
+  // sessions, into the Analytics Engine time-series the /stats page reads. The interval is a
+  // direct KV cost — each run spends a queueDepth LIST + per-runner statscursor PUT/GET against
+  // the 1,000/day free-tier list+write budgets — so it's kept coarse and the LIST/PUT are
+  // skipped when there's nothing to record (see sampleStats).
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     await sampleStats(env);
   },
@@ -197,8 +202,8 @@ async function handleGate(
 }
 
 /**
- * handleQueue is polled by a waiting gate page (~every 20s). It refreshes the visitor's
- * ticket TTL (so stopping for ~2min drops them), reports their live FIFO position, and — when
+ * handleQueue is polled by a waiting gate page (~every 45s). It refreshes the visitor's
+ * ticket TTL (so stopping for ~3min drops them), reports their live FIFO position, and — when
  * they reach the front and a slot frees — assigns it and tells the page to go.
  */
 async function handleQueue(env: Env, ip: string, kvKey: string): Promise<Response> {
@@ -475,7 +480,7 @@ a{color:#2563eb}
   function queue(pos){
     show("queued");
     if(pos){ document.getElementById("qpos").textContent=pos; }
-    if(!qpoll){ qpoll=setInterval(pollQueue,20000); }
+    if(!qpoll){ qpoll=setInterval(pollQueue,45000); }
   }
   function pollQueue(){
     fetch("/_queue",{method:"POST"}).then(function(r){return r.json();}).then(function(res){
@@ -529,7 +534,10 @@ async function sampleStats(env: Env): Promise<void> {
   const free = caps.reduce((a, c) => a + c.free, 0);
   const busy = caps.reduce((a, c) => a + c.busy, 0);
   const warm = caps.reduce((a, c) => a + c.warm, 0);
-  const qd = await queueDepth(env);
+  // A queue only forms when every runner is full (assignNew returned null), so when there's
+  // free capacity skip the queueDepth KV LIST entirely — it's the cron's single biggest list
+  // cost and would otherwise run unconditionally against the 1,000/day free-tier list budget.
+  const qd = free > 0 ? 0 : await queueDepth(env);
   try {
     env.STATS?.writeDataPoint({ indexes: ["capacity"], blobs: [], doubles: [free, busy, qd, warm] });
   } catch {}
@@ -544,7 +552,12 @@ async function sampleStats(env: Env): Promise<void> {
         env.STATS?.writeDataPoint({ indexes: ["session"], blobs: [c.reason || ""], doubles: [c.durationSec || 0] });
       } catch {}
     }
-    if (typeof s.now === "number") await env.SESSIONS.put(ck, String(s.now));
+    // Advance the cursor (a KV PUT) only when we actually recorded completions — idle cron
+    // runs would otherwise burn one write per runner per interval against the 1,000/day budget.
+    // Not advancing on an idle run is safe: next run re-queries from the same `since` and finds
+    // nothing new, so no completion is ever double-counted.
+    if (typeof s.now === "number" && (s.completions || []).length > 0)
+      await env.SESSIONS.put(ck, String(s.now));
   }
 }
 
@@ -642,7 +655,7 @@ async function statsPage(env: Env): Promise<Response> {
   const busyNow = caps.reduce((a, c) => a + c.busy, 0);
   const warmNow = caps.reduce((a, c) => a + c.warm, 0);
   const perRunner = runners.map((r, i) => ({ label: runnerLabel(r, i), ...caps[i] }));
-  const qNow = await queueDepth(env);
+  const qNow = freeNow > 0 ? 0 : await queueDepth(env); // skip the LIST unless the fleet is full
   return html(renderStats({ outcomes, sess, capTs, sessTs, funnel, freeNow, busyNow, warmNow, qNow, perRunner, configured: !!env.CF_API_TOKEN }));
 }
 
@@ -843,6 +856,6 @@ ${chart("Slots in use vs free", `<span class="dot" style="background:#3a8a52"></
 ${chart("Queue depth", `<span class="dot" style="background:#f5a623"></span>visitors waiting`, spark([{ values: qd, color: "#f5a623" }]))}
 ${chart("Completed sessions per hour", `<span class="dot" style="background:#60a5fa"></span>sessions`, spark([{ values: sphv, color: "#60a5fa" }]))}
 
-<p class="note">Numbers illustrate demo traffic, not a benchmark. Capacity and queue depth are sampled every 5 minutes; session lengths are measured by each runner from hand-out to reap. Stored in Cloudflare Analytics Engine (~90-day retention). Back to <a href="https://bigfleet.lucy.sh/">BigFleet</a>.</p>
+<p class="note">Numbers illustrate demo traffic, not a benchmark. Capacity and queue depth are sampled every 15 minutes; session lengths are measured by each runner from hand-out to reap. Stored in Cloudflare Analytics Engine (~90-day retention). Back to <a href="https://bigfleet.lucy.sh/">BigFleet</a>.</p>
 </div></body></html>`;
 }
