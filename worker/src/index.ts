@@ -736,7 +736,8 @@ function renderStats(d: {
     ["act:scenario:critical", "ran fleet preemption"],
     ["act:scenario:saturate", "saturated the fleet"],
     ["act:demand", "drove demand (§6)"],
-    ["act:dashboard", "opened a dashboard"],
+    ["act:fleet-dashboard", "opened BigFleet's own dashboard"],
+    ["act:dashboard", "opened a cluster's k8s dashboard"],
   ]
     .map(([k, label]) =>
       card(label, n(fmap[k] || 0), landed > 0 ? pct(fmap[k] || 0, landed) + "% of those who landed" : ""),
