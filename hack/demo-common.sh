@@ -106,19 +106,26 @@ ensure_kwok(){
 # NEVER clobbers local work — a dirty tree is left untouched, and it only fast-forwards (a
 # diverged/non-ff branch is left as-is). Tolerates a detached HEAD (the old SHA-pinning left
 # clones detached). No-op when the repo is absent (fresh clone / CI -> falls back to go.mod pins).
+# NOTE: this file runs under `set -euo pipefail`, so every line here is written to ALWAYS
+# succeed (return 0) — an absent sibling, a failed fetch, or a non-ff branch must be a no-op,
+# never abort the build. (A bare `return 1` or a failing `a || b` chain would kill demo-build.sh
+# and crash-loop the demohost.)
 self_update_sibling(){
   local d="$1" name; name="$(basename "$d")"
-  [ -d "$d/.git" ] || return 1
+  [ -d "$d/.git" ] || return 0
   if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
     log "self-update: $name has local changes — left at $(git -C "$d" rev-parse --short HEAD 2>/dev/null)"; return 0
   fi
-  git -C "$d" fetch -q origin main 2>/dev/null || { log "self-update: $name fetch failed — using current checkout"; return 0; }
-  git -C "$d" checkout -q main 2>/dev/null || git -C "$d" checkout -qB main FETCH_HEAD 2>/dev/null
+  if ! git -C "$d" fetch -q origin main 2>/dev/null; then
+    log "self-update: $name fetch failed — using current checkout"; return 0
+  fi
+  git -C "$d" checkout -q main 2>/dev/null || git -C "$d" checkout -qB main FETCH_HEAD 2>/dev/null || true
   if git -C "$d" merge -q --ff-only FETCH_HEAD 2>/dev/null; then
     log "self-update: $name -> $(git -C "$d" rev-parse --short HEAD) (latest main)"
   else
-    log "self-update: $name not fast-forwardable — left at $(git -C "$d" rev-parse --short HEAD)"
+    log "self-update: $name not fast-forwardable — left at $(git -C "$d" rev-parse --short HEAD 2>/dev/null)"
   fi
+  return 0
 }
 
 # setup_engine_workspace — on a host that carries the sibling SOURCE checkouts (the live
@@ -137,13 +144,18 @@ setup_engine_workspace(){
   self_update_sibling "$dash"
   self_update_sibling "$providers"
   if [ -d "$bf/.git" ]; then
+    # if/fi (not `[ ] && echo`) so the block always exits 0 under set -e even without providers
     { echo "go $(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
       echo
       echo "use ."
       echo "use ../bigfleet"
-      [ -d "$providers/.git" ] && echo "use ../bigfleet-providers"
+      if [ -d "$providers/.git" ]; then echo "use ../bigfleet-providers"; fi
     } > "$REPO_ROOT/go.work"
-    log "engine workspace: go.work -> ../bigfleet$([ -d "$providers/.git" ] && echo ' + ../bigfleet-providers') (tracking latest main)"
+    if [ -d "$providers/.git" ]; then
+      log "engine workspace: go.work -> ../bigfleet + ../bigfleet-providers (tracking latest main)"
+    else
+      log "engine workspace: go.work -> ../bigfleet (tracking latest main)"
+    fi
   fi
 }
 
