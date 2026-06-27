@@ -101,6 +101,52 @@ ensure_kwok(){
   chmod +x "$KWOK_DIR/kwokctl" "$KWOK_DIR/kwok"
 }
 
+# self_update_sibling DIR — fast-forward a sibling SOURCE checkout (../bigfleet etc.) to latest
+# origin/main so the runners track upstream without hand-bumped pins. SAFE by construction: it
+# NEVER clobbers local work — a dirty tree is left untouched, and it only fast-forwards (a
+# diverged/non-ff branch is left as-is). Tolerates a detached HEAD (the old SHA-pinning left
+# clones detached). No-op when the repo is absent (fresh clone / CI -> falls back to go.mod pins).
+self_update_sibling(){
+  local d="$1" name; name="$(basename "$d")"
+  [ -d "$d/.git" ] || return 1
+  if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
+    log "self-update: $name has local changes — left at $(git -C "$d" rev-parse --short HEAD 2>/dev/null)"; return 0
+  fi
+  git -C "$d" fetch -q origin main 2>/dev/null || { log "self-update: $name fetch failed — using current checkout"; return 0; }
+  git -C "$d" checkout -q main 2>/dev/null || git -C "$d" checkout -qB main FETCH_HEAD 2>/dev/null
+  if git -C "$d" merge -q --ff-only FETCH_HEAD 2>/dev/null; then
+    log "self-update: $name -> $(git -C "$d" rev-parse --short HEAD) (latest main)"
+  else
+    log "self-update: $name not fast-forwardable — left at $(git -C "$d" rev-parse --short HEAD)"
+  fi
+}
+
+# setup_engine_workspace — on a host that carries the sibling SOURCE checkouts (the live
+# runners), pull them to latest main and write a gitignored go.work so the demo binaries, the
+# engine binaries (shard/operator/upc, via resolve_bigfleet_dir -> go list) AND the dashboard
+# all build from those local trees in lockstep — auto-updating whenever upstream main moves,
+# instead of tracking a hand-bumped pin. No checkouts -> no go.work -> the build falls back to
+# the reproducible go.mod pins (the fresh-clone / CI path). go.work{,​.sum} are gitignored.
+setup_engine_workspace(){
+  local parent bf dash providers
+  parent="$(cd "$REPO_ROOT/.." 2>/dev/null && pwd)"
+  bf="$parent/bigfleet"
+  dash="${BIGFLEET_DASHBOARD_DIR:-$parent/bigfleet-web-dashboard}"
+  providers="$parent/bigfleet-providers"
+  self_update_sibling "$bf"
+  self_update_sibling "$dash"
+  self_update_sibling "$providers"
+  if [ -d "$bf/.git" ]; then
+    { echo "go $(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
+      echo
+      echo "use ."
+      echo "use ../bigfleet"
+      [ -d "$providers/.git" ] && echo "use ../bigfleet-providers"
+    } > "$REPO_ROOT/go.work"
+    log "engine workspace: go.work -> ../bigfleet$([ -d "$providers/.git" ] && echo ' + ../bigfleet-providers') (tracking latest main)"
+  fi
+}
+
 build_bins(){
   mkdir -p "$BIN"
   # SKIP_BUILD lets the demohost build the shared binaries ONCE, then spawn many
@@ -113,8 +159,15 @@ build_bins(){
     if [ "$ok" = "1" ]; then log "SKIP_BUILD=1 — reusing prebuilt binaries in $BIN"; return; fi
     log "SKIP_BUILD=1 but binaries missing — building anyway"
   fi
+  setup_engine_workspace   # pull sibling source checkouts to latest main + wire go.work (runners)
+  # Force ONE toolchain across the whole build (demo binaries, shard/operator/upc, dashboard).
+  # The demo (go 1.26.4), the engine clone (1.26.0) and the dashboard (1.26.1) declare different
+  # minimums; left to GOTOOLCHAIN=auto each host picks its own, and the shared GOCACHE then
+  # clashes ("compile: version goX does not match go tool version goY"). Pinning every build to
+  # the demo's toolchain makes it deterministic regardless of the host's base go (Mini/M1 differ).
+  export GOTOOLCHAIN="go$(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
   resolve_bigfleet_dir
-  log "building node-creator + fakecloud-provider + demo-backend (demo) + shard + operator + upc (published bigfleet) -> $BIN"
+  log "building node-creator + fakecloud-provider + demo-backend (demo) + shard + operator + upc (bigfleet @ $BIGFLEET_DIR) -> $BIN"
   ( cd "$REPO_ROOT" && go build -o "$BIN/node-creator" ./cmd/node-creator )
   ( cd "$REPO_ROOT" && go build -o "$BIN/fakecloud-provider" ./cmd/fakecloud-provider )
   ( cd "$REPO_ROOT" && go build -o "$BIN/demo-backend" ./backend/cmd/demo-backend )
@@ -131,22 +184,20 @@ build_bins(){
 # the /fleet-dash/ reverse-proxy prefix) into $BIN. Best-effort: a host without the dashboard
 # checkout or npm just skips it and the session runs without the fleet dashboard (demo-up.sh and
 # demo-fleet-dashboard.sh both gate on $BIN/bigfleet-web-dashboard existing). The dashboard links
-# the coordinator/shard-read protos from a sibling ../bigfleet (its go.mod `replace`), so we pin
-# that sibling to the SAME bigfleet revision the demo's engine uses to avoid gRPC contract skew,
-# and force the demo's Go toolchain so the shared build cache doesn't clash.
+# the coordinator/shard-read protos from a sibling ../bigfleet (its go.mod `replace`); setup_engine_workspace
+# already pulled BOTH ../bigfleet and ../bigfleet-web-dashboard to latest main, so they stay in gRPC
+# lockstep without a hand-pinned revision. We still force the demo's Go toolchain so the shared
+# build cache doesn't clash with the dashboard's own go.mod toolchain line.
 build_fleet_dashboard(){
   local dash="${BIGFLEET_DASHBOARD_DIR:-$(cd "$REPO_ROOT/.." 2>/dev/null && pwd)/bigfleet-web-dashboard}"
   [ -d "$dash" ] || { log "fleet-dash build: $dash absent — skipping (no BigFleet dashboard this run)"; return 0; }
   command -v npm >/dev/null 2>&1 || { log "fleet-dash build: npm not found — skipping"; return 0; }
-  local bfsha gotc bf
-  bfsha=$(grep -oE "intUnderflow/bigfleet v[0-9][^ ]*-[0-9a-f]{12}" "$REPO_ROOT/go.mod" | grep -oE "[0-9a-f]{12}$" | head -1)
+  local gotc bf dashsha bfsha
   gotc="go$(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
   bf="$(cd "$dash/.." 2>/dev/null && pwd)/bigfleet"
-  if [ -d "$bf/.git" ] && [ -n "$bfsha" ]; then
-    ( cd "$bf" && git fetch -q --all 2>/dev/null; git checkout -q "$bfsha" 2>/dev/null ) \
-      || log "fleet-dash build: could not pin $bf to $bfsha (proto may skew)"
-  fi
-  log "building bigfleet-web-dashboard (BASE_PATH=/fleet-dash/, engine ${bfsha:-?}, $gotc) -> $BIN/bigfleet-web-dashboard"
+  dashsha=$(git -C "$dash" rev-parse --short HEAD 2>/dev/null)
+  bfsha=$(git -C "$bf" rev-parse --short HEAD 2>/dev/null)
+  log "building bigfleet-web-dashboard (BASE_PATH=/fleet-dash/, dashboard ${dashsha:-?}, engine ${bfsha:-?}, $gotc) -> $BIN/bigfleet-web-dashboard"
   if ( cd "$dash" && GOTOOLCHAIN="$gotc" BASE_PATH=/fleet-dash/ make build >/dev/null 2>&1 ) \
      && [ -x "$dash/bin/bigfleet-web-dashboard" ]; then
     cp "$dash/bin/bigfleet-web-dashboard" "$BIN/bigfleet-web-dashboard"

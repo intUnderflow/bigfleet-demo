@@ -2,15 +2,19 @@ module github.com/intUnderflow/bigfleet-demo
 
 go 1.26.4
 
-// The demo depends ONE-WAY on the PUBLISHED sibling repos as ordinary Go modules —
-// github.com/intUnderflow/bigfleet (the engine + CRDs) and .../bigfleet-providers
-// (providerkit + the conformance suite). They are pinned by the versions in the require
-// block below (no local `replace` directives), so a fresh clone is `go build`-able and
-// `hack/demo-up.sh` fetches the engine binaries/CRDs from the module cache. These are
-// ordinary Go pins (a concrete version + go.sum hash = reproducible, verified builds);
-// track the engine's main with `go get github.com/intUnderflow/bigfleet@latest` (or
-// @<commit>). For local engine development, add a gitignored go.work
-// (`go work init . ../bigfleet ../bigfleet-providers`).
+// The demo depends ONE-WAY on the sibling repos github.com/intUnderflow/bigfleet (the engine
+// + CRDs) and .../bigfleet-providers (providerkit + the conformance suite). The require block
+// below pins concrete versions (+ go.sum hashes) with NO committed `replace`, so a fresh clone
+// / CI is `go build`-able and reproducible from the module cache.
+//
+// On the live runners we do NOT bump these pins by hand: hack/demo-common.sh
+// (setup_engine_workspace, run by demo-build.sh) fast-forwards the sibling ../bigfleet and
+// ../bigfleet-web-dashboard checkouts to latest origin/main at build time and writes a
+// gitignored go.work, so the demo binaries, the engine binaries (shard/operator/upc) and the
+// dashboard all build from those local trees in lockstep — auto-updating whenever upstream main
+// moves. The pins here are the FLOOR for environments WITHOUT the sibling checkouts; bump them
+// with `go get github.com/intUnderflow/bigfleet@latest` only when the fresh-clone build needs a
+// newer engine API.
 require (
 	github.com/intUnderflow/bigfleet v0.0.0-20260626110112-d5bb282bd402
 	github.com/intUnderflow/bigfleet-providers v0.1.1-0.20260623133353-eaaa5830051a
