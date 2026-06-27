@@ -187,17 +187,81 @@ build_bins(){
   # the demo's toolchain makes it deterministic regardless of the host's base go (Mini/M1 differ).
   export GOTOOLCHAIN="go$(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
   resolve_bigfleet_dir
-  log "building node-creator + fakecloud-provider + demo-backend (demo) + shard + operator + upc (bigfleet @ $BIGFLEET_DIR) -> $BIN"
-  ( cd "$REPO_ROOT" && go build -o "$BIN/node-creator" ./cmd/node-creator )
-  ( cd "$REPO_ROOT" && go build -o "$BIN/fakecloud-provider" ./cmd/fakecloud-provider )
-  ( cd "$REPO_ROOT" && go build -o "$BIN/demo-backend" ./backend/cmd/demo-backend )
-  # shard/operator/UPC come from the PUBLISHED bigfleet module (built from its own
-  # complete go.mod in the read-only module cache) — no local engine checkout required.
-  ( cd "$BIGFLEET_DIR"
-    go build -o "$BIN/shard"    ./cmd/bigfleet
-    go build -o "$BIN/operator" ./cmd/operator
-    go build -o "$BIN/upc"      ./cmd/bigfleet-unschedulable-pod-controller )
-  build_fleet_dashboard
+  # Stage the core binaries and promote to $BIN only if ALL six build. With auto-update the
+  # runners track latest upstream main, so a breaking BigFleet/demo commit could fail the build;
+  # staging means a failure NEVER overwrites the last-good set — the demo keeps serving the
+  # previous binaries instead of crash-looping. $BIN/.build-status (ok|failed <sha>) lets the
+  # autodeploy report a CI check; $BIN/.built-from records the sibling revisions a good set came
+  # from, so a held-back build can roll the checkouts back to stay coherent with the kept binaries.
+  local demo_sha stage ok b dashdir have
+  demo_sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
+  stage="$BIN/.stage"; rm -rf "$stage"; mkdir -p "$stage"
+  log "building node-creator + fakecloud-provider + demo-backend (demo) + shard + operator + upc (bigfleet @ $BIGFLEET_DIR) -> staging"
+  ok=1
+  ( cd "$REPO_ROOT" && go build -o "$stage/node-creator" ./cmd/node-creator ) || ok=0
+  ( cd "$REPO_ROOT" && go build -o "$stage/fakecloud-provider" ./cmd/fakecloud-provider ) || ok=0
+  ( cd "$REPO_ROOT" && go build -o "$stage/demo-backend" ./backend/cmd/demo-backend ) || ok=0
+  # shard/operator/UPC build from the bigfleet checkout resolved above (local clone on the
+  # runners via go.work, else the read-only module cache at the go.mod pin).
+  ( cd "$BIGFLEET_DIR" && go build -o "$stage/shard"    ./cmd/bigfleet ) || ok=0
+  ( cd "$BIGFLEET_DIR" && go build -o "$stage/operator" ./cmd/operator ) || ok=0
+  ( cd "$BIGFLEET_DIR" && go build -o "$stage/upc"      ./cmd/bigfleet-unschedulable-pod-controller ) || ok=0
+
+  # Promote the staged binaries only if ALL six built; a promote (mv) failure flips ok->0 so it
+  # falls into the hold-back path rather than aborting the build under set -e (crash-loop risk).
+  if [ "$ok" = "1" ]; then
+    for b in node-creator fakecloud-provider demo-backend shard operator upc; do mv -f "$stage/$b" "$BIN/$b" || ok=0; done
+  fi
+  rm -rf "$stage"
+  if [ "$ok" = "1" ]; then
+    build_fleet_dashboard
+    dashdir="${BIGFLEET_DASHBOARD_DIR:-$(cd "$REPO_ROOT/.." 2>/dev/null && pwd)/bigfleet-web-dashboard}"
+    { echo "bigfleet $(git -C "$BIGFLEET_DIR" rev-parse HEAD 2>/dev/null || true)"
+      # only record the dashboard rev if its binary was actually (re)built at it — build_fleet_dashboard
+      # keeps the previous binary on failure, so an unconditional record would point rollback at a
+      # source rev that disagrees with the running dashboard binary.
+      if [ "${DASH_BUILT:-0}" = "1" ] && [ -d "$dashdir/.git" ]; then echo "dashboard $(git -C "$dashdir" rev-parse HEAD 2>/dev/null || true)"; fi
+    } > "$BIN/.built-from"
+    printf 'ok %s\n' "$demo_sha" > "$BIN/.build-status"
+    log "shared demo binaries ready in $BIN (build OK @ $demo_sha)"
+  else
+    have=1
+    for b in node-creator fakecloud-provider demo-backend shard operator upc; do [ -x "$BIN/$b" ] || have=0; done
+    printf 'failed %s\n' "$demo_sha" > "$BIN/.build-status"
+    if [ "$have" != "1" ]; then
+      die "build failed on latest and there is no last-good binary set in $BIN to fall back to"
+    fi
+    log "⚠️  BUILD FAILED on latest main — HOLDING BACK: keeping the last-good binaries in $BIN; the demo stays up on the previous version"
+    rollback_to_last_good   # restore the sibling checkouts so kept binaries + applied CRDs stay coherent
+  fi
+}
+
+# rollback_to_last_good — after a held-back build, restore the sibling source checkouts to the
+# revisions the kept (last-good) binaries were built from (recorded in $BIN/.built-from), so the
+# running engine, the CRDs demo-up.sh applies from $BIGFLEET_DIR, and the kept dashboard all stay
+# in lockstep at the last-good revision rather than a broken latest main. Best-effort + set -e safe.
+rollback_to_last_good(){
+  [ -f "$BIN/.built-from" ] || return 0
+  local parent name sha d
+  parent="$(cd "$REPO_ROOT/.." 2>/dev/null && pwd)" || return 0
+  while read -r name sha; do
+    [ -n "${name:-}" ] && [ -n "${sha:-}" ] || continue
+    case "$name" in
+      bigfleet)  d="$parent/bigfleet" ;;
+      dashboard) d="$parent/bigfleet-web-dashboard" ;;
+      *) continue ;;
+    esac
+    if [ -d "$d/.git" ] && git -C "$d" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+      # -f: a held-back build leaves the tree dirty (failed `go build` churns go.sum, npm churns
+      # package-lock), and a plain `git checkout` REFUSES on a dirty tracked file and silently
+      # no-ops — leaving the sibling on the broken commit. Force discards that build churn to land
+      # the exact known-good rev; surface a WARN (not `|| true`) if it still can't.
+      git -C "$d" checkout -q -f "$sha" 2>/dev/null \
+        && log "rolled $name back to ${sha:0:7} (last-good)" \
+        || log "WARN: could not roll $name back to ${sha:0:7} — CRD source may be incoherent"
+    fi
+  done < "$BIN/.built-from"
+  return 0
 }
 
 # build_fleet_dashboard builds the out-of-tree bigfleet-web-dashboard ONCE (its UI baked with
@@ -209,18 +273,22 @@ build_bins(){
 # lockstep without a hand-pinned revision. We still force the demo's Go toolchain so the shared
 # build cache doesn't clash with the dashboard's own go.mod toolchain line.
 build_fleet_dashboard(){
+  DASH_BUILT=0   # global flag build_bins reads to decide whether to record the dashboard rev
   local dash="${BIGFLEET_DASHBOARD_DIR:-$(cd "$REPO_ROOT/.." 2>/dev/null && pwd)/bigfleet-web-dashboard}"
-  [ -d "$dash" ] || { log "fleet-dash build: $dash absent — skipping (no BigFleet dashboard this run)"; return 0; }
+  [ -d "$dash/.git" ] || { log "fleet-dash build: $dash absent — skipping (no BigFleet dashboard this run)"; return 0; }
   command -v npm >/dev/null 2>&1 || { log "fleet-dash build: npm not found — skipping"; return 0; }
+  # `|| true` on these: they're for the log/rollback only, and a bare `var=$(...)` that exits
+  # non-zero would abort the whole build under set -e (crash-loop), which the dashboard — being
+  # non-fatal — must never do.
   local gotc bf dashsha bfsha
-  gotc="go$(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}')"
+  gotc="go$(grep -oE '^go [0-9.]+' "$REPO_ROOT/go.mod" | awk '{print $2}' || true)"
   bf="$(cd "$dash/.." 2>/dev/null && pwd)/bigfleet"
-  dashsha=$(git -C "$dash" rev-parse --short HEAD 2>/dev/null)
-  bfsha=$(git -C "$bf" rev-parse --short HEAD 2>/dev/null)
+  dashsha=$(git -C "$dash" rev-parse --short HEAD 2>/dev/null || true)
+  bfsha=$(git -C "$bf" rev-parse --short HEAD 2>/dev/null || true)
   log "building bigfleet-web-dashboard (BASE_PATH=/fleet-dash/, dashboard ${dashsha:-?}, engine ${bfsha:-?}, $gotc) -> $BIN/bigfleet-web-dashboard"
   if ( cd "$dash" && GOTOOLCHAIN="$gotc" BASE_PATH=/fleet-dash/ make build >/dev/null 2>&1 ) \
      && [ -x "$dash/bin/bigfleet-web-dashboard" ]; then
-    cp "$dash/bin/bigfleet-web-dashboard" "$BIN/bigfleet-web-dashboard"
+    cp "$dash/bin/bigfleet-web-dashboard" "$BIN/bigfleet-web-dashboard" && DASH_BUILT=1
   else
     log "fleet-dash build FAILED — session runs without the BigFleet dashboard (non-fatal)"
   fi
