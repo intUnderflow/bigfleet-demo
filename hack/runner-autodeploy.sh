@@ -12,6 +12,7 @@
 # IDLE poll (nothing moved) never restarts, so visitors are only ever disrupted by a REAL update.
 #
 # DRY_RUN=1 reports what it would do without pulling/rebuilding/restarting.
+# Live on r1 (Mini) + r2 (M1) since 2026-06-27 (launchd, 5-min interval).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
