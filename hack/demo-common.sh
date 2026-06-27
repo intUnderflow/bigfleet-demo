@@ -111,10 +111,18 @@ ensure_kwok(){
 # never abort the build. (A bare `return 1` or a failing `a || b` chain would kill demo-build.sh
 # and crash-loop the demohost.)
 self_update_sibling(){
-  local d="$1" name; name="$(basename "$d")"
+  local d="$1" name f; name="$(basename "$d")"
   [ -d "$d/.git" ] || return 0
-  if [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ]; then
-    log "self-update: $name has local changes — left at $(git -C "$d" rev-parse --short HEAD 2>/dev/null)"; return 0
+  # The build churns tracked files that aren't source: `npm install` rewrites
+  # ui/package-lock.json, `go build` can touch go.sum. Restore that churn so it isn't mistaken
+  # for human WIP and left to block the fast-forward (this is what stuck a runner's dashboard
+  # clone a release behind). Genuine source edits, checked next, still pause the update.
+  for f in package-lock.json ui/package-lock.json go.sum; do
+    git -C "$d" checkout -q -- "$f" 2>/dev/null || true
+  done
+  # Only TRACKED modifications count as human work-in-progress (untracked build artifacts don't).
+  if ! git -C "$d" diff --quiet 2>/dev/null || ! git -C "$d" diff --cached --quiet 2>/dev/null; then
+    log "self-update: $name has local source changes — left at $(git -C "$d" rev-parse --short HEAD 2>/dev/null)"; return 0
   fi
   if ! git -C "$d" fetch -q origin main 2>/dev/null; then
     log "self-update: $name fetch failed — using current checkout"; return 0
