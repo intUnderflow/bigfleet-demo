@@ -1,0 +1,20 @@
+# M16 PriorityClass → penalty defaults for the UPC (--priority-class-defaults).
+# These drive BigFleet's REAL EffectiveCost = price + interruptionProbability×penalty
+# routing across the fakecloud provider's spot vs on-demand Speculative slots:
+#
+#   batch       interruption-TOLERANT  → penalty $0   → bucket $0   → cheap SPOT
+#   production  interruption-tolerant  → penalty $0.5 → bucket $0.5 → cheap SPOT
+#   critical    interruption-SENSITIVE → penalty $16  → bucket $16  → stable ON-DEMAND
+#
+# Crossover (spot stops being the cheaper effective choice) is ~$1 with the demo's
+# illustrative spot(0.12,0.30)/on-demand(0.38,0.05) constants: penalties below it
+# route to spot, above it to on-demand on BOTH clouds. So everyday batch+production
+# ride cheap interruptible spot, and only interruption-sensitive critical gets stable
+# on-demand. Penalties are author-chosen ILLUSTRATIVE dollars (NOT measured costs);
+# the routing DECISION is the real engine (EffectiveCost = price + prob×penalty).
+batch:
+  interruptionPenalty: "0"
+production:
+  interruptionPenalty: "0.5"
+critical:
+  interruptionPenalty: "16"

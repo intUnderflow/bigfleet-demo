@@ -1,0 +1,54 @@
+# name must match the Worker created in the Cloudflare dashboard / Workers Builds project.
+name = "bigfleet-demo"
+main = "src/index.ts"
+compatibility_date = "2025-07-18"
+
+# Runner base URLs — each a demohost daemon behind an HTTPS tunnel. Replace with your real
+# runner(s); leaving the placeholder deploys fine but the worker has no capacity to assign.
+# Entries may be strings or { "url": "...", "name": "..." } objects.
+[vars]
+RUNNERS = '["https://r1-bigfleet-demo.lucy.sh","https://r2-bigfleet-demo.lucy.sh"]'
+# Minimum invisible reCAPTCHA v3 score (0..1) a visitor must clear to be spent a live
+# session; below it (or with no token) they fall through to the static /demo tour. 0.5 is
+# Google's suggested default. Raise toward 0.7 to be stingier, lower to be more permissive.
+RECAPTCHA_MIN_SCORE = "0.5"
+# Cloudflare account id — used to build the Analytics Engine SQL URL the /stats page queries.
+# Not a secret (account ids are not sensitive).
+CF_ACCOUNT_ID = "9ebaebff33692c29581708936a390f0a"
+
+# Analytics Engine: the /stats time-series store. Writes go through this binding (no token);
+# the /stats page READS via the SQL API, which needs CF_API_TOKEN (secret, below).
+[[analytics_engine_datasets]]
+binding = "STATS"
+dataset = "bigfleet_demo_stats"
+
+# Sample capacity + queue depth and scrape per-runner session durations every 15 minutes.
+# 15 (not 5) to stay inside the free-tier KV budget: each cron run spends a queueDepth LIST +
+# per-runner statscursor PUT/GET against the tiny 1,000/day list+write ceilings — a fixed
+# daily tax that runs even with zero visitors, so we keep it coarse.
+[triggers]
+crons = ["*/15 * * * *"]
+
+# KV: ip -> session assignment (auto-expires at session end). REQUIRED — the build FAILS until
+# `id` is a real namespace id from YOUR account. Create it once:
+#   npx wrangler kv namespace create SESSIONS      # -> prints the id; paste it below
+# preview_id is only used by remote `wrangler dev`; local dev simulates KV, so it can stay as-is.
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "1bc60c4b633d4655ae3450ca8ac5aafb"
+preview_id = "1bc60c4b633d4655ae3450ca8ac5aafb"
+
+# Bind the worker to the public hostname (after the lucy.sh zone + DNS record exist).
+# Uncomment and set your zone:
+# [[routes]]
+# pattern = "bigfleet-demo.lucy.sh/*"
+# zone_name = "lucy.sh"
+
+# SECRETS — never in this file. For a Workers-Builds (git-integrated) deploy, add them under
+# Settings -> Variables and Secrets in the dashboard; for a CLI deploy:
+#   npx wrangler secret put DEMOHOST_KEY        # contents of ../secrets/demohost.key
+#   npx wrangler secret put RECAPTCHA_SECRET     # reCAPTCHA v3 secret key
+#   npx wrangler secret put RECAPTCHA_V2_SECRET  # reCAPTCHA v2 checkbox secret key
+#   npx wrangler secret put CF_API_TOKEN         # a Cloudflare API token with Account Analytics:Read
+#                                                # (only used by /stats to query Analytics Engine)
+# For `wrangler dev`, put these (and a localhost RUNNERS override) in worker/.dev.vars.

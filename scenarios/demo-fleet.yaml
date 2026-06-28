@@ -1,0 +1,79 @@
+# demo-fleet — a TWO-TIER fleet for the public BigFleet demo: owned on-prem
+# bare metal (always-on, $0 marginal) + elastic cloud burst (GCP / AWS,
+# pay-per-use). This is the whole point of the demo's cost story.
+#
+# WHY two tiers (ADR-0026 — model the WHOLE capacity model, not just the owned
+# half): BigFleet's real cheapest-first logic only becomes VISIBLE when there
+# are two price tiers. The Idle/BareMetal seed is owned hardware (price $0 —
+# marginal cost zero, capex already paid); the Speculative/OnDemand seed is
+# cloud quota (priced, and $0 until actually provisioned). Phase 1 packs the
+# $0 owned Idle pool FIRST, then BURSTS to the priced cloud only when owned
+# capacity is exhausted — and sheds the cloud first on reclaim. The previous
+# single-tier seed (--seed-machines only) modelled every machine as free owned
+# bare metal, so the reserve read as "idle cloud you're paying for" and the
+# cheap-first preference was invisible. This fixes both.
+#
+# HOW the split maps to the shard seed (cmd/bigfleet/shard.go seedFakeInventory):
+#   --seed-machines    -> Catalog.ForSeed()   = `archetypes`       -> Idle / BareMetal      -> on-prem owned
+#   --seed-speculative -> Catalog.ForDemand()  = `demandArchetypes` -> Speculative / OnDemand -> cloud burst
+# seedFakeInventory round-robins an archetype's instanceTypes across its
+# machines, so listing n2 + m6i in the cloud tier interleaves GCP/AWS evenly
+# (and provisions them in a balanced GCP/AWS order — the engine does NOT prefer
+# one cloud over the other; both are $1/hr OnDemand in the harness).
+#
+# All instance types are 2 vCPU / 8 GiB so the demo stays LEGIBLE: one unit of
+# demand -> one node (CLAUDE.md's #1 failure mode is a big node silently
+# absorbing many pods so BigFleet looks idle).
+#
+# HONESTY (CLAUDE.md): "on-prem / GCP / AWS", the instance-type names, and the
+# dollar figures are author-chosen LABELS/CONSTANTS on kwok fake nodes — not
+# real instances, not cloud quotes. What IS real and on display: the engine
+# prefers the $0 owned tier over the priced cloud tier (Phase-1 cheapest-first)
+# and bursts to cloud only under pressure. The demo never claims a measured
+# saving; every $ is illustrative.
+
+# Node shape: realistic 8 vCPU / 32 GiB general-purpose nodes (was 2/8Gi, which
+# forced 1-pod-per-node and read as fake). Workload pods now request FRACTIONS
+# (0.5-3 vCPU), so BigFleet packs many needs per machine and the scheduler packs
+# many pods per node — real bin-packing, node count emergent. See
+# docs/research/realism-review.md.
+
+# Tier 1 — COMMITTED capacity -> Idle / BareMetal / $0 marginal (the SEED tier).
+# Two flavours of "already paid for": owned on-prem bare metal AND AWS RESERVED
+# instances (reserved/committed-use = fixed capacity, marginal cost zero — paper
+# bigfleet.md:20). Split ~28 on-prem : ~20 AWS-reserved by weight. They MUST use
+# DISTINCT SKUs from the on-demand burst tier (m6i reserved vs m5 on-demand), since
+# the only signal BigFleet passes to the node is the instance-type.
+archetypes:
+  - name: onprem-baremetal
+    weight: 28
+    instanceTypes: [bare-metal-8vcpu]      # on-prem owned hardware ($0 marginal)
+    zones: [rack-1, rack-2, rack-3]
+    resources: { cpu: "7500m", memory: "28Gi" }   # = node ALLOCATABLE; node-creator adds reserve -> capacity 8/32Gi
+    priorityClasses: [100]
+    interruptionPenalty: 0                  # owned hardware isn't interrupted
+    reclamationPenalty: 64
+    meanLifetimeSeconds: 0
+  - name: aws-reserved
+    weight: 20
+    instanceTypes: [m6i.2xlarge]            # AWS RESERVED instances ($0 marginal — already paid)
+    zones: [zone-a, zone-b, zone-c]
+    resources: { cpu: "7500m", memory: "28Gi" }
+    priorityClasses: [100]
+    interruptionPenalty: 0                  # reserved isn't interrupted
+    reclamationPenalty: 64
+    meanLifetimeSeconds: 0
+
+# Tier 2 — elastic ON-DEMAND cloud burst -> Speculative / OnDemand / priced (the DEMAND
+# tier). $0 until provisioned; the engine reaches here only when committed Idle can't
+# cover. AWS on-demand uses m5 (distinct SKU from the m6i reserved committed tier).
+demandArchetypes:
+  - name: cloud-burst
+    weight: 1
+    instanceTypes: [n2-standard-8, m5.2xlarge]   # GCP / AWS on-demand facades (8 vCPU/32GiB, pay-per-use)
+    zones: [zone-a, zone-b, zone-c]
+    resources: { cpu: "7500m", memory: "28Gi" }   # = node ALLOCATABLE; node-creator adds reserve -> capacity 8/32Gi
+    priorityClasses: [100]
+    interruptionPenalty: 32
+    reclamationPenalty: 64
+    meanLifetimeSeconds: 0

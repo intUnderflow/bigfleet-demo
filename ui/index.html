@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<title>BigFleet — live capacity demo</title>
+<style>
+  :root{
+    /* BigFleet house palette — Starlight hue-224 slate + the site's #2563eb accent */
+    --bg:#17181c;--bg-2:#1b1d24;--panel:#23262f;--panel-2:#2a2d37;
+    --ink:#edeef3;--ink-2:#c1c3c8;--muted:#888c96;--line:#353841;--hair:#20232b;
+    --accent:#2563eb;--accent-high:#93c5fd;--real:#3ddc84;--sim:#f7b955;--bad:#ff6b6b;--idle:#3a4150;
+    --gcp:#4285F4;--aws:#ff9900;--azure:#19c3d6;--prov:#5b6675;
+    --spot:#a78bfa;--onprem:#34d399;--onprem-idle:#1f6e4f;--onprem-idle-ink:#bfe9d4;--avail:#222732;--track:#131419;color-scheme:dark;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;
+    font:15px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+
+  /* top bar — BigFleet wordmark (matches the Starlight site header) + live status + honesty strip */
+  .topbar{flex:0 0 auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap;position:sticky;top:0;z-index:30;
+    padding:10px 20px;border-bottom:1px solid var(--line);background:var(--bg-2)}
+  .topbar .brand{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-size:16px;
+    letter-spacing:-.01em;white-space:nowrap;text-decoration:none;color:var(--accent-high)}
+  .topbar .brand svg{flex:none;display:block}
+  .topbar .brand:hover{filter:brightness(1.1)}
+  .topbar .tagline{font-size:12.5px;color:var(--muted);padding-left:12px;border-left:1px solid var(--line)}
+  .conn{font-size:11px;color:var(--muted)} .conn.ok{color:var(--real)}
+  .honesty-strip{font-size:11.5px;color:var(--muted);margin-left:auto}
+  .honesty-strip b{color:var(--sim);font-weight:600}
+
+  /* hosted-session bar — only shown when the backend reports a session clock (the
+     standalone local demo has none). Live countdown to the session's deadline; goes
+     amber under 5 min and red under 1 min. */
+  .sessionbar{display:none;flex:0 0 auto;align-items:center;gap:9px;flex-wrap:wrap;
+    padding:7px 20px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:500}
+  .sessionbar.show{display:flex}
+  .sessionbar.warn{background:var(--sim);color:#241a04}
+  .sessionbar.crit{background:var(--bad);color:#fff}
+  .sessionbar .clock{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums}
+  .sessionbar .sb-note{margin-left:auto;opacity:.88;font-weight:400}
+  .sessionbar .sb-dot{width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.95;
+    animation:sbpulse 2s infinite}
+  @keyframes sbpulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.5)}70%{box-shadow:0 0 0 6px rgba(255,255,255,0)}100%{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
+
+  /* session-ended overlay (deadline reached, or the host reaped the session) */
+  .ended{display:none;position:fixed;inset:0;z-index:50;background:rgba(10,11,14,.86);
+    align-items:center;justify-content:center;padding:20px}
+  .ended.show{display:flex}
+  .ended .card{max-width:430px;background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:26px 28px;text-align:center;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+  .ended h3{margin:0 0 8px;font-size:18px;color:var(--ink)}
+  .ended p{margin:0 0 16px;font-size:13.5px;color:var(--muted);line-height:1.6}
+  .ended button{background:var(--accent);color:#fff;border:0;border-radius:9px;
+    padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer}
+  .ended button:hover{filter:brightness(1.08)}
+
+  .layout{flex:1 1 auto;display:grid;grid-template-columns:clamp(380px,38%,520px) 1fr;min-height:0}
+  .doc,.live{overflow-y:auto;min-height:0;padding:22px 26px 60px}
+  .doc{border-right:1px solid var(--line);background:var(--bg-2)}
+
+  /* left guided doc */
+  .doc h1{font-size:21px;margin:0 0 4px}
+  .doc .lede{color:var(--muted);font-size:13.5px;margin:0 0 18px}
+  .doc section{margin:0 0 22px;padding-bottom:20px;border-bottom:1px solid var(--hair)}
+  .doc section:last-child{border-bottom:0}
+  .doc h2{font-size:15px;margin:0 0 7px;color:var(--ink);display:flex;align-items:center;gap:8px}
+  .doc h2 .n{font-size:11px;font-weight:700;color:#fff;background:var(--accent);
+    border-radius:999px;min-width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center}
+  .doc p{margin:0 0 10px;font-size:13.5px;color:var(--ink-2)}
+  .doc .small{font-size:12.5px;color:var(--muted)}
+  .doc b{color:#fff}
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 2px}
+  .action{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 13px;
+    font-size:13px;font-weight:600;cursor:pointer}
+  .action:hover{filter:brightness(1.08)}
+  .action.ghost{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);font-weight:500}
+  .action.ghost:hover{border-color:var(--accent)}
+  .action:disabled{opacity:.4;cursor:not-allowed;filter:none}
+  .rs{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:4px}
+  .rs .k{color:var(--real);font-weight:600} .rs .s{color:var(--sim);font-weight:600}
+  .rs ul{margin:4px 0 0;padding-left:17px} .rs li{margin:3px 0}
+
+  /* right live pane */
+  .live h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 9px}
+  .live .sec{margin-bottom:22px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px 16px}
+
+  /* two-tier supply: one bar per pool (owned on-prem, cloud burst) */
+  .pool{margin-bottom:13px}
+  .pool-hd{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:12px;margin-bottom:5px}
+  .pool-name{font-weight:600;color:var(--ink)}
+  .pool-name[title],.scoreboard .sb[title]{cursor:help}
+  .pool-sub{color:var(--muted);font-weight:400;font-size:11px;margin-left:6px}
+  .pool-fig{font-family:var(--mono);font-size:11.5px;color:var(--muted);white-space:nowrap}
+  .supply{display:flex;height:28px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--track)}
+  .supply .seg{display:flex;align-items:center;justify-content:center;font-size:11px;color:#06210f;font-weight:700;transition:width .6s ease;min-width:0;white-space:nowrap;overflow:hidden}
+  .supply .seg.owned-idle{background:var(--onprem-idle);color:var(--onprem-idle-ink)}
+  .supply .seg.avail{background:repeating-linear-gradient(45deg,var(--hair),var(--hair) 6px,var(--track) 6px,var(--track) 12px);color:var(--muted)}
+  .cost{font-size:13px;margin:11px 0 2px;font-weight:600;color:var(--ink)}
+  .cost .z{color:var(--real)} .cost .b{color:var(--sim)}
+  .cost .proj{font-weight:400;font-size:11.5px;color:var(--muted)}
+  .scoreboard{display:flex;gap:0;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:2px 0;margin-bottom:14px}
+  .scoreboard .sb{flex:1 1 0;min-width:96px;padding:9px 14px;border-right:1px solid var(--line)}
+  .scoreboard .sb:last-child{border-right:0}
+  .scoreboard .sb .k{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  .scoreboard .sb .v{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--ink);margin-top:2px;line-height:1.1}
+  .scoreboard .sb .s{font-size:10.5px;color:var(--muted);margin-top:1px}
+  .scoreboard .sb .v.green{color:var(--onprem)} .scoreboard .sb .v.amber{color:var(--aws)} .scoreboard .sb .v.zero{color:var(--muted)} .scoreboard .sb .v.spot{color:var(--spot)}
+  .cap{font-size:12px;color:var(--muted);margin-top:8px}
+  .legend{display:flex;gap:13px;margin-top:9px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+  .dot.hatch{background:repeating-linear-gradient(45deg,var(--hair),var(--hair) 3px,var(--track) 3px,var(--track) 6px)}
+
+  .fleet{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:13px}
+  .cluster h3{margin:0 0 2px;font-size:15px;display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  .cluster h3 .nodes-badge{font-family:var(--mono);font-size:12px;font-weight:400;color:var(--muted);white-space:nowrap}
+  .cluster h3 .nodes-badge b{font-size:15px;color:var(--ink)}
+  .crit-lvl{font-family:var(--mono);font-size:12px;color:var(--bad);white-space:nowrap}
+  .cluster .mix{font-size:11.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap;margin-top:2px}
+  .cluster .mix .chip{white-space:nowrap}
+  .tiles{display:flex;flex-wrap:wrap;gap:3px;margin:10px 0;min-height:40px;align-content:flex-start}
+  .tile{width:11px;height:11px;border-radius:2px;background:var(--real);transition:background .3s}
+  .tile.prov{background:var(--prov);animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.9}50%{opacity:.32}}
+  .stat{display:flex;gap:12px;font-size:12px;color:var(--muted);margin:9px 0 2px;flex-wrap:wrap}
+  .stat b{color:var(--ink)}
+  .stat .disp b{color:var(--bad)}
+  /* low-priority batch the scheduler displaced to place critical work (§4 preemption victim) */
+  .tile.displaced{background:var(--idle);opacity:.5;animation:none;outline:1px dashed var(--bad);outline-offset:-1px}
+  .crow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .demand-ctl{display:flex;align-items:center;gap:6px}
+  .demand-ctl .lvl{font-family:var(--mono);min-width:62px;text-align:center;font-size:12px}
+  button.sm{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:5px 9px;font-size:12.5px;cursor:pointer}
+  button.sm:hover{border-color:var(--accent)}
+  .dash-btn{width:100%;margin-top:9px}
+
+  .feed{font-family:var(--mono);font-size:12px;max-height:240px;overflow:auto}
+  .feed div{padding:3px 0;border-bottom:1px solid var(--hair);color:var(--ink-2)}
+  .feed .new{color:var(--real)}
+
+  @media(max-width:900px){
+    body{display:block} .layout{display:block;grid-template-columns:1fr}
+    .doc,.live{overflow:visible} .doc{border-right:0;border-bottom:1px solid var(--line)}
+    .honesty-strip{margin-left:0;flex-basis:100%}
+  }
+
+  /* Follow the browser's light/dark preference (no toggle). Light = Starlight's
+     inverted hue-224 scale; semantic colours darkened to stay legible on white. */
+  @media (prefers-color-scheme: light){
+    :root{
+      color-scheme:light;
+      --bg:#ffffff;--bg-2:#f6f7f9;--panel:#f6f7f9;--panel-2:#eceef2;
+      --ink:#17181c;--ink-2:#3c3f47;--muted:#5e626b;--line:#d6d9df;--hair:#e6e8ec;--track:#eef0f3;
+      --accent:#2563eb;--accent-high:#1e3a8a;
+      --real:#15803d;--sim:#b45309;--bad:#dc2626;
+      --onprem:#059669;--onprem-idle:#6ee7b7;--onprem-idle-ink:#064e3b;
+      --aws:#c2680a;--spot:#7c3aed;--gcp:#1a73e8;--prov:#94a3b8;--avail:#e9ecf1;
+    }
+    body{-webkit-font-smoothing:auto}
+  }
+</style>
+</head>
+<body>
+  <div class="sessionbar" id="sessionbar">
+    <span class="sb-dot"></span>
+    <span>Temporary live demo session — ends in <span class="clock" id="sessionclock">—:—</span></span>
+    <span class="sb-note" id="sessionnote">free &amp; ephemeral · up to 1 hour, or ~5 min after you close this tab</span>
+  </div>
+  <div class="topbar">
+    <a class="brand" href="https://bigfleet.lucy.sh">
+      <svg viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <rect x="6" y="20" width="14" height="14" rx="2" fill="#2563eb"/>
+        <rect x="25" y="14" width="14" height="14" rx="2" fill="#3b82f6"/>
+        <rect x="44" y="20" width="14" height="14" rx="2" fill="#60a5fa"/>
+        <rect x="6" y="40" width="14" height="14" rx="2" fill="#1d4ed8"/>
+        <rect x="25" y="34" width="14" height="14" rx="2" fill="#2563eb"/>
+        <rect x="44" y="40" width="14" height="14" rx="2" fill="#3b82f6"/>
+      </svg>
+      <span>BigFleet</span>
+    </a>
+    <span class="tagline">live capacity demo</span>
+    <span id="conn" class="conn">connecting…</span>
+    <span class="honesty-strip">Real BigFleet + real Kubernetes scheduling · <b>simulated</b> cloud — kwok nodes, illustrative $ prices, simulated transfer speed</span>
+  </div>
+
+  <div class="layout">
+    <!-- LEFT: the guided tutorial -->
+    <aside class="doc">
+      <h1>BigFleet: one pool of capacity, shared across your clusters</h1>
+      <p class="lede">A live, interactive demo of <b>BigFleet</b>, a fleet-level Kubernetes autoscaler. Each cluster scales itself today, so capacity gets stranded in per-cluster <b>islands</b> — one cluster starved for nodes while another sits idle, with no way to shift between them. BigFleet pools them and moves capacity to where it&rsquo;s needed. Press the buttons on the left; the fleet on the right reacts in real time.</p>
+
+      <section>
+        <h2><span class="n">1</span>Not another cluster autoscaler</h2>
+        <p>Cluster Autoscaler and Karpenter are per-cluster — and on top of the islands, they make you pay the <b>buffer tax</b>: every cluster parks its own idle-node buffer against its own worst case, headroom standing idle in <i>every</i> cluster. BigFleet works a level up. <b>Within one shard</b> — the boundary it manages, here three clusters — it treats those clusters&rsquo; nodes as <b>one shared pool</b>, and that single capability shows up three ways: idle capacity serves another cluster&rsquo;s demand (the <b>move</b>, §3), low-priority work is preempted under scarcity (<b>preemption</b>, §4), and you keep <b>one shared buffer for the shard, not one per cluster</b>. Same idea, three payoffs.</p>
+        <p class="small">It provisions and reclaims <b>nodes</b>; it does <b>not</b> schedule pods — each cluster&rsquo;s own kube-scheduler does that. This runs BigFleet&rsquo;s <b>real engine</b> against a simulated kwok cloud.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">2</span>Your fleet — three clusters, one finite pool</h2>
+        <p>On the right: three <b>real Kubernetes clusters</b> — <b>cluster-a</b>, <b>cluster-b</b>, <b>cluster-c</b> — drawing on <b>one shared, finite pool</b> of machines. They&rsquo;re already busy — running batch across the fleet plus a production workload on <b>cluster-a</b> — all packed onto already-paid-for <b>committed</b> capacity at <b>$0/hr</b> (no on-demand cloud running). The pool can&rsquo;t grow past its ceiling, which is exactly why <i>moving</i> capacity between clusters is the whole game. That idle slice of committed capacity sitting ready — the <b>&ldquo;Shared buffer&rdquo;</b> on the scoreboard — <i>is</i> the shard&rsquo;s burst buffer: held <b>once</b>, re-bindable to whichever cluster bursts next (a multi-step move, not instant).</p>
+      </section>
+
+      <section>
+        <h2><span class="n">3</span>Capacity moves between clusters</h2>
+        <p>Here&rsquo;s the payoff. You wind <b>cluster-A&rsquo;s production demand down</b> and <b>spike cluster-B&rsquo;s</b> — a routine traffic shift, and the committed pool is finite, so there&rsquo;s no room to grow into. A per-cluster autoscaler would leave cluster-A&rsquo;s freed nodes sitting idle and <b>buy cluster-B a brand-new node</b>. Watch BigFleet instead <b>reclaim the nodes cluster-A no longer needs and hand that freed capacity to cluster-B</b> — the same committed pool you already own, reallocated A&rarr;B: no new node, no new cloud spend on the move.</p>
+        <div class="actions">
+          <button class="action" data-scenario="move" onclick="scenario('move')">▶ Move capacity from cluster-A to cluster-B</button>
+          <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
+        </div>
+        <p class="small">This cross-cluster move is BigFleet&rsquo;s <b>real</b> control logic running against a simulated cloud. <i>You</i> changed the demand on both sides; BigFleet only reacts — as cluster-A&rsquo;s demand falls it reclaims A&rsquo;s freed nodes into the shard&rsquo;s shared <b>Idle</b> pool, then reuses that committed hardware for cluster-B rather than bursting new cloud. It genuinely <i>reasons about</i> cost (the dollar figures are illustrative constants, not quotes). The wait you watch — cluster-A&rsquo;s production draining, then cluster-B&rsquo;s nodes coming up — is a <b>simulated dwell</b>, not a measured transfer time: BigFleet&rsquo;s real decision, transfer speed simulated.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">4</span>A full fleet → preemption across the fleet</h2>
+        <p>The other thing only a <i>fleet-level</i> autoscaler does. We <b>fill the finite fleet</b>, then a burst of <b>critical</b> production demand (PriorityClass <code>critical</code>) lands with no capacity left to provision. <b>Priority decides</b>: the real Kubernetes scheduler preempts running <b>batch</b> work to place the critical pods, and BigFleet reallocates the finite fleet toward what matters — the low-priority batch is what&rsquo;s left waiting, not the work that counts.</p>
+        <div class="actions">
+          <button class="action" data-scenario="critical" onclick="scenario('critical')">▶ Fill the fleet, then send in critical demand</button>
+          <button class="action ghost" onclick="resetDemo()">↺ Reset the fleet</button>
+        </div>
+        <p class="small">Real <code>Preempted</code> events from the stock scheduler; real BigFleet reallocation. BigFleet doesn&rsquo;t invent capacity — it allocates a finite fleet by priority. Only the provisioning time is simulated.</p>
+      </section>
+
+      <p class="lede" style="margin-top:36px">That&rsquo;s the payoff — capacity moving across a finite fleet, the part no per-cluster autoscaler can reach. The rest is <b>how it decides</b>, and proof it&rsquo;s all real.</p>
+
+      <section>
+        <h2><span class="n">5</span>How it chooses: cheapest capacity first</h2>
+        <p>Every move above is driven by <b>cost</b>: BigFleet scores candidate capacity by <code>effective_cost = price + interruption_probability × penalty</code> and fills the cheapest first. Three tiers, shared across all clusters:</p>
+        <p>&bull; <b style="color:var(--onprem)">Committed</b> — on-prem bare metal you own, <b>or reserved (prepaid) cloud</b> (e.g. AWS reserved instances). Already paid for, so work on it costs <b>~$0 at the margin</b>. Filled <b>first</b>.</p>
+        <p>&bull; <b style="color:var(--gcp)">On-demand cloud</b> (GCP / AWS) — elastic, pay-per-use, <b>stable</b>; nothing until provisioned. Burst here when committed is full.</p>
+        <p>&bull; <b style="color:var(--spot)">Spot</b> — the same SKUs, much cheaper, but <b>interruptible</b>. BigFleet routes <b>interruption-tolerant</b> work to cheap spot and <b>interruption-sensitive</b> work to stable on-demand — because spot&rsquo;s interruption term outweighs the saving for that work. Real engine math, not a script.</p>
+        <p class="small">Each tier is <b>declared by a real <code>CapacityProvider</code></b> — three out-of-tree backends (on-prem / AWS / GCP) implementing the genuine <code>providerkit</code> six-RPC contract and <b>passing the BigFleet conformance suite</b> (<code>core,cloud,spot</code>); only the substrate (kwok) is simulated. The $ prices + interruption odds are provider-<i>declared</i> illustrative constants — the engine really reasons about them, but no <i>measured</i> saving is claimed.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">6</span>Drive it yourself: provision &amp; reclaim</h2>
+        <p>The table-stakes scale-out/in, shown so you can watch the cost ordering up close. Add a burst of production demand and BigFleet packs the pending requests onto fresh nodes — <b>committed first</b> (still $0), then <b>bursting onto on-demand cloud</b> ($ ticks up). Drop it and it <b>sheds the billed cloud nodes first</b>, keeping paid-for committed warm.</p>
+        <div class="actions">
+          <button class="action" data-mutates onclick="setDemand('cluster-c',24)">▶ Add demand to cluster-C</button>
+          <button class="action ghost" data-mutates onclick="setDemand('cluster-c',0)">↺ Drop it</button>
+        </div>
+        <p class="small">This is what any autoscaler does — it&rsquo;s the fleet-level moves in §3&ndash;§4 that are BigFleet&rsquo;s alone. Each node bin-packs several pods (open a dashboard to see); the provisioning time is a simulated dwell.</p>
+      </section>
+
+      <section>
+        <h2><span class="n">7</span>The fleet is finite</h2>
+        <p>No infinite cloud here. Committed is fixed and the on-demand quota has a ceiling. Push demand onto <b>all three clusters at once</b>: committed fills, on-demand fills behind it, and cost climbs to its peak until nearly every machine is in use. That hard ceiling is what makes the moves and preemption above <i>necessary</i> — and what a per-cluster view never sees.</p>
+        <div class="actions"><button class="action" data-scenario="saturate" onclick="scenario('saturate')">▶ Saturate the fleet (load all 3 clusters)</button></div>
+      </section>
+
+      <section>
+        <h2><span class="n">8</span>Prove it&rsquo;s real — real clusters, real BigFleet</h2>
+        <p>Each cluster is a genuine Kubernetes cluster — a real apiserver, the stock <b>kube-scheduler</b>, real controllers. Open its <b>official Kubernetes dashboard</b> and you&rsquo;ll see the nodes BigFleet provisioned — committed on-prem <code>bm-dc1-…</code> boxes alongside cloud <code>gke-…</code> / <code>ip-10-…</code> instances tagged <code>bigfleet.demo/billing: on-demand</code> or <code>spot</code>. The nodes are <b>kwok-simulated</b> (<code>bigfleet.demo/simulated</code>, <code>kwok://</code> providerID) — only the cloud is fake, never the control plane.</p>
+        <p>And the <i>engine</i> is real too: open <b>BigFleet&rsquo;s own dashboard</b> — the actual product UI, <b>read-only</b> — pointed at <b>this session&rsquo;s</b> live shard, coordinator and clusters. It reads genuine control-plane telemetry: the shard&rsquo;s machine inventory and assign/preempt/reclaim decisions (from its Prometheus metrics), the coordinator&rsquo;s fleet topology, the per-shard provider it dials, and the capacity requests on each cluster. Nothing in it is staged for the demo.</p>
+        <p class="small">The capacity flows through <b>real providers</b> — three out-of-tree <code>CapacityProvider</code> backends (on-prem / AWS / GCP) over the genuine six-RPC <code>providerkit</code> contract, <b>conformance-certified</b> (<code>core,cloud,spot</code>); the spot-vs-on-demand tier on each node is BigFleet&rsquo;s real effective-cost decision read back from the provider, not a label we painted. In the BigFleet dashboard the <b>$ figures are the same illustrative constants</b>, and there are no real CPU/memory <i>usage</i> numbers (kwok runs pods at their request) — the engine&rsquo;s decisions are real, the cloud underneath is simulated.</p>
+        <div class="actions">
+          <button class="action ghost" id="fleet-dash-btn" onclick="openFleetDash()">⎈ Open BigFleet&rsquo;s dashboard (read-only)</button>
+          <button class="action ghost" onclick="openDash('cluster-a')">⎈ cluster-A k8s dashboard</button>
+          <button class="action ghost" onclick="openDash('cluster-b')">⎈ cluster-B</button>
+          <button class="action ghost" onclick="openDash('cluster-c')">⎈ cluster-C</button>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="n">9</span>What&rsquo;s real, what&rsquo;s simulated</h2>
+        <div class="rs">
+          <div><span class="k">● Real</span>
+            <ul><li>BigFleet&rsquo;s engine and its Phase 1/2/3 decisions — it sorts candidate capacity by <b>effective cost</b> (<code>price + interruption×penalty</code>), so it really does fill the $0-marginal committed tier first, route interruption-tolerant work to cheap <b>spot</b> and sensitive work to stable on-demand, and reclaim under pressure</li><li>The <b>three CapacityProviders</b> (on-prem / AWS / GCP) — real <code>providerkit</code> six-RPC backends that pass the BigFleet <b>conformance suite</b>; the capacity types + prices + interruption probabilities are provider-<i>declared</i></li><li>The <b>real upstream Kubernetes scheduler</b> per cluster — native priority ordering, <b>preemption</b> &amp; bin-packing (MostAllocated), nothing hand-rolled</li><li>A real Kubernetes apiserver, scheduler &amp; controllers per cluster</li></ul></div>
+          <div><span class="s">● Simulated</span>
+            <ul><li>The clouds themselves — <b>on-prem / GCP / AWS are labels</b> on kwok-simulated nodes, not real instances (the providers mint kwok fakes, not VMs)</li><li>The <b>$ prices and interruption probabilities</b> (committed $0 marginal, on-demand ~$0.38, spot ~$0.11 / interruption ~30%) — illustrative author-chosen constants, <b>not cloud quotes</b>; the engine really reasons about them, but no <i>measured</i> saving is claimed</li><li><b>Provisioning &amp; drain time</b> — the move is real; the ~15-40s a node takes to come up (and the drain on reclaim) is a configured dwell</li><li><b>Node internals</b> — pod requests/limits, the kube/system reserve (Allocatable &lt; Capacity) and the cni/kube-proxy/node-exporter DaemonSet baseline are illustrative; kwok runs pods at their request, so there are no real CPU/memory <i>usage</i> metrics</li></ul></div>
+        </div>
+        <p class="small" style="margin-top:12px"><b>Industry context</b> — third-party, <i>not</i> measured here and <i>not</i> a BigFleet result: independent analysis (Datadog, <i>State of Cloud Costs</i>) finds enterprise Kubernetes fleets average <b>~18% CPU utilisation</b>, <b>2&ndash;5&times; over-provisioning</b>, and an estimated <b>$50k&ndash;$500k per cluster per year</b> of wasted spend. That&rsquo;s the symptom of capacity <b>trapped in per-cluster islands</b>: when each cluster scales itself and provisioning is slow, each one parks its own idle headroom against its own worst case &mdash; N independent buffers, with no mechanism to rebalance a starved cluster against an idle one. Pooling is the structural answer &mdash; within a shard, one shared committed buffer instead of N: by the same statistical-multiplexing principle as any shared pool, less-correlated peaks need less combined headroom than the sum of separate per-cluster buffers. This demo shows the engine <b>reasoning about</b> that trapped capacity &mdash; <b>prefer the shared Idle pool before buying new</b> &mdash; at a deliberately small scale; it measures and recovers nothing, and quotes no percentage.</p>
+      </section>
+    </aside>
+
+    <!-- RIGHT: the live fleet -->
+    <main class="live">
+      <div class="scoreboard" id="scoreboard"></div>
+      <div class="sec">
+        <h2>Shared supply — committed · on-demand · spot</h2>
+        <div class="panel">
+          <div class="pool">
+            <div class="pool-hd">
+              <span class="pool-name" title="On-prem bare metal you own, or reserved cloud you&rsquo;ve prepaid. Already paid for, so work on it costs ~$0 at the margin — BigFleet fills it first, before any on-demand cloud."><span class="dot" style="background:var(--onprem)"></span>Committed<span class="pool-sub">already paid · $0 to add work</span></span>
+              <span class="pool-fig" id="fig-onprem"></span>
+            </div>
+            <div class="supply" id="supply-onprem"></div>
+          </div>
+          <div class="pool">
+            <div class="pool-hd">
+              <span class="pool-name" title="On-demand or spot capacity, metered by the hour — $0 until BigFleet provisions it. Elastic burst, drawn only after committed is full — not a pre-provisioned buffer."><span class="dot" style="background:var(--gcp)"></span>Cloud<span class="pool-sub">pay-per-use · $0 until provisioned</span></span>
+              <span class="pool-fig" id="fig-cloud"></span>
+            </div>
+            <div class="supply" id="supply-cloud"></div>
+          </div>
+          <div class="cost" id="cost"></div>
+          <div class="legend" id="legend"></div>
+        </div>
+      </div>
+      <div class="sec">
+        <h2>Clusters</h2>
+        <div class="fleet" id="fleet"></div>
+      </div>
+      <div class="sec">
+        <h2>Decision feed</h2>
+        <div class="panel feed" id="feed"></div>
+      </div>
+    </main>
+  </div>
+
+<script>
+const CLOUD_COLORS={'On-prem':'var(--onprem)',GCP:'var(--gcp)',AWS:'var(--aws)',Azure:'var(--azure)'};
+const CLOUD_PROVIDERS=['GCP','AWS'];          // the elastic (billed) providers
+let last={}, lastFeedLen=0, clouds=['On-prem','GCP','AWS'];
+let legSpot=-1;
+const sig={feed:''};
+
+const es=new EventSource('/api/stream');
+es.onopen=()=>{const c=document.getElementById('conn');c.textContent='● live';c.className='conn ok';};
+es.onerror=()=>{const c=document.getElementById('conn');c.textContent='● reconnecting';c.className='conn';};
+es.onmessage=e=>render(JSON.parse(e.data));
+
+// ── funnel tracking — deduped milestones to /_event (hosted: recorded; local/standalone: 204) ──
+var _fired={}, _funnelInit=false;
+function track(step){ if(_fired[step])return; _fired[step]=1;
+  try{ fetch('/_event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({step:step}),keepalive:true}); }catch(e){} }
+function initFunnel(){ if(_funnelInit)return; _funnelInit=true; track('landed');
+  if('IntersectionObserver' in window){
+    var io=new IntersectionObserver(function(es){ es.forEach(function(e){ if(e.isIntersecting){
+      var nEl=e.target.querySelector('h2 .n'); if(nEl) track('section:'+nEl.textContent.trim()); } }); },{threshold:0.5});
+    document.querySelectorAll('section').forEach(function(s){ if(s.querySelector('h2 .n')) io.observe(s); });
+  } }
+function render(st){ last=st; if(st.clouds&&st.clouds.length) clouds=st.clouds; renderScore(st); renderSupply(st); renderFleet(st); renderFeed(st); syncScenarioButtons(st); initFunnel(); const fdb=document.getElementById('fleet-dash-btn'); if(fdb) fdb.style.display=st.fleetDashboard?'':'none'; }
+
+// While a scenario runs it self-establishes its precondition over tens of seconds; disable the
+// other triggers so a mis-click can't silently abandon it. Reset stays live (to cancel).
+function syncScenarioButtons(st){
+  const running=!!(st&&st.scenario);
+  // disable the scenario triggers AND the manual demand controls (§6 + the per-cluster bumps),
+  // since a mid-run poke could break the move's drain-then-spike $0 ordering. Reset stays live.
+  document.querySelectorAll('button[data-scenario],button[data-mutates]').forEach(b=>{ b.disabled=running; });
+}
+
+// renderScore: the at-a-glance fleet scoreboard — total nodes vs the finite 120-cap,
+// the committed/on-demand split, free headroom, and the honest on-demand $/hr. All
+// derived from the same FleetState; no new claims.
+function renderScore(st){
+  const c=st.capacity||{}, cap=st.fleetSize||120;
+  const live=(c.onpremInUse||0)+(c.cloudInUse||0);
+  const cost=c.costPerHour||0;
+  const pending=(st.clusters||[]).reduce((a,x)=>a+(x.podsPending||0),0);
+  // Four at-a-glance stats; On-demand+Spot fold into one Cloud cell (the bar shows the split
+  // once cloud is in use). Pending only surfaces when work is actually waiting on capacity.
+  const cells=[
+    {k:'Fleet in use', v:`${live} / ${cap}`, s:'nodes carrying work', cls:'', t:"Nodes across all three clusters carrying work right now, out of the fleet's finite ceiling — one shared pool, no per-cluster limit."},
+    {k:'Committed ($0)', v:`${c.onpremInUse||0} / ${c.onpremTotal||0}`, s:'owned + reserved', cls:'green', t:"On-prem bare metal you own, or reserved cloud you've prepaid. Already paid for, so work on it costs ~$0 at the margin — BigFleet fills it first, before any on-demand cloud."},
+    {k:'Shared buffer', v:`${c.onpremIdle||0}`, s:'idle committed · any cluster', cls:'green', t:"Already-paid-for committed nodes sitting idle right now — the fleet's single shared burst buffer, re-bindable to whichever cluster bursts next via the shard's shared Idle hub. Pooled, not eliminated."},
+    {k:'Cloud', v:`${c.cloudInUse||0}`, s:c.cloudInUse>0?'metered · pay-per-use':'none — elastic, $0 until used', cls:(c.cloudInUse>0?'amber':'zero'), t:"On-demand / spot nodes provisioned right now — metered. Elastic burst, drawn only after committed is full; $0 when none are running — not a pre-provisioned buffer."},
+    {k:'Cloud $/hr', v:`$${cost.toFixed(2)}`, s:cost>0?'illustrative':'no cloud running', cls:(cost>0?'amber':'zero'), t:"Illustrative metered cost of the on-demand cloud running now (author-chosen constant, not a quote). Committed capacity is $0 at the margin."},
+  ];
+  if(pending>0) cells.push({k:'Pending', v:`${pending}`, s:'waiting on capacity', cls:'amber', t:"Pods with no node — higher-priority demand the finite fleet has no room to place."});
+  document.getElementById('scoreboard').innerHTML=cells.map(x=>
+    `<div class="sb" title="${x.t||''}"><div class="k">${x.k}</div><div class="v ${x.cls}">${x.v}</div><div class="s">${x.s}</div></div>`).join('');
+}
+
+// drawBar: persistent segments (created once) whose widths animate — no innerHTML
+// churn, so the bar slides smoothly instead of flashing. Segments are kept in the
+// passed order via insertBefore, but only MOVED when actually out of position — so a
+// new SKU slots in correctly while steady-state ticks don't reset the width transition.
+function drawBar(elId,total,segs){
+  const el=document.getElementById(elId);
+  // Prune segments no longer present (e.g. cloud SKUs after a drain, or folded committed SKUs)
+  // so a transitioned-away segment doesn't linger at its last width.
+  const keys=new Set(segs.map(s=>s.key));
+  Array.from(el.children).forEach(ch=>{ if(!keys.has(ch.dataset.seg)) el.removeChild(ch); });
+  segs.forEach((s,idx)=>{
+    let d=el.querySelector('[data-seg="'+s.key+'"]');
+    if(!d){ d=document.createElement('div'); d.className='seg'+(s.cls?' '+s.cls:''); d.dataset.seg=s.key;
+            if(s.color) d.style.background=s.color; }
+    if(el.children[idx]!==d) el.insertBefore(d, el.children[idx]||null);
+    d.style.width=(100*s.n/(total||1))+'%';
+    d.textContent=s.n?(s.label+s.n):'';
+  });
+}
+
+// map a SKU/instance-type to its provider (mirrors the backend) — for grouping + colour.
+function providerOfType(t){
+  if(t.indexOf('bare-metal')===0||t.indexOf('onprem')===0) return 'On-prem';
+  if(t.indexOf('n2-')===0||t.indexOf('e2-')===0||t.indexOf('n1-')===0) return 'GCP';
+  return 'AWS';
+}
+const PROV_ORDER={'On-prem':0,'GCP':1,'AWS':2};
+// build colour-grouped bar segments from a {SKU:count} map, sorted by provider then SKU,
+// labelled with the real SKU and coloured by its provider.
+function typeSegs(byType, prefix){
+  return Object.keys(byType||{}).sort((a,b)=>
+    (PROV_ORDER[providerOfType(a)]-PROV_ORDER[providerOfType(b)]) || a.localeCompare(b)
+  ).map(t=>({key:prefix+t, n:byType[t]||0, color:CLOUD_COLORS[providerOfType(t)], label:providerOfType(t)+' '+t+' '}));
+}
+
+// Two-tier supply: committed bar (per-SKU in use / idle, all $0) and on-demand cloud bar
+// (per-SKU in use / available headroom), plus the honest on-demand $/hr.
+function renderSupply(st){
+  const c=st.capacity||{};
+  // Committed in-use SPLIT BY PROVIDER — on-prem owned vs AWS reserved (both committed, $0 at
+  // the margin) — then idle. Grouped by provider, not the verbose instance-type SKU (that stays
+  // in the hover title), so the owned-vs-reserved split is legible without the clutter.
+  const cmByProv={};
+  Object.keys(c.committedByType||{}).forEach(t=>{ const p=providerOfType(t); cmByProv[p]=(cmByProv[p]||0)+(c.committedByType[t]||0); });
+  const cmSegs=Object.keys(cmByProv).sort((a,b)=>(PROV_ORDER[a]||0)-(PROV_ORDER[b]||0)).map(p=>(
+    {key:'cm-'+p, n:cmByProv[p], color:CLOUD_COLORS[p], label:(p==='On-prem'?'on-prem ':p+' reserved ')}));
+  cmSegs.push({key:'own-idle', n:c.onpremIdle||0, cls:'owned-idle', label:'idle '});
+  drawBar('supply-onprem', c.onpremTotal||1, cmSegs);
+  const cmSku=Object.keys(c.committedByType||{}).sort().map(t=>providerOfType(t)+' '+t+' '+c.committedByType[t]).join(' · ');
+  const elOn=document.getElementById('supply-onprem'); if(elOn) elOn.title=cmSku||'';
+  document.getElementById('fig-onprem').textContent=`${c.onpremInUse||0} / ${c.onpremTotal||0} in use · $0`;
+
+  // Cloud: just headroom at rest; the per-SKU + spot split only appears once cloud is
+  // provisioned (i.e. when a scenario bursts onto it).
+  const cost=c.costPerHour||0, spot=c.spotInUse||0, od=c.onDemandInUse||0, inUse=c.cloudInUse||0;
+  const segs=[];
+  if(inUse>0){
+    segs.push(...typeSegs(c.cloudByType, 'cl-'));
+    Object.keys(c.spotByType||{}).sort().forEach(t=>segs.push(
+      {key:'sp-'+t, n:c.spotByType[t]||0, color:'var(--spot)', label:'SPOT '+t+' '}));
+  }
+  segs.push({key:'cl-avail', n:c.cloudAvailable||0, cls:'avail', label:'available '});
+  drawBar('supply-cloud', c.cloudTotal||1, segs);
+  document.getElementById('fig-cloud').textContent = inUse>0
+    ? `${inUse} / ${c.cloudTotal||0} · ${od} on-demand + ${spot} spot · $${cost.toFixed(2)}/hr`
+    : `0 / ${c.cloudTotal||0} · $0 until provisioned`;
+
+  // One cost line. The full price + scale disclosure lives in the §9 what's-real panel.
+  const el=document.getElementById('cost');
+  if(cost>0){
+    const split = spot>0
+      ? ` &mdash; <b style="color:var(--spot)">${spot} spot</b> (~$${(c.spotHourly||0).toFixed(2)}) + ${od} on-demand (~$${(c.nodeHourly||0).toFixed(2)}/node&middot;hr); BigFleet put tolerant work on cheaper spot`
+      : '';
+    el.innerHTML=`Metered cloud: <b class="b">$${cost.toFixed(2)}/hr</b> <span class="proj">(illustrative)</span>${split}. Committed adds <span class="z">$0 at the margin</span>.`;
+  } else {
+    el.innerHTML=`No on-demand cloud running &mdash; all work is on <b>committed</b> capacity, <span class="z">$0 at the margin</span> (already paid for).`;
+  }
+
+  // Compact, adaptive legend — spot only appears once it's actually in use.
+  const hasSpot=spot>0;
+  if(hasSpot!==legSpot){ legSpot=hasSpot;
+    const leg=[`<span><span class="dot" style="background:var(--onprem)"></span>committed &middot; on-prem</span>`,
+               `<span><span class="dot" style="background:var(--aws)"></span>committed &middot; AWS reserved</span>`,
+               `<span><span class="dot" style="background:var(--onprem-idle)"></span>idle &middot; shared buffer ($0)</span>`,
+               `<span><span class="dot" style="background:var(--gcp)"></span>on-demand</span>`];
+    if(hasSpot) leg.push(`<span><span class="dot" style="background:var(--spot)"></span>spot</span>`);
+    leg.push(`<span><span class="dot hatch"></span>available ($0)</span>`);
+    document.getElementById('legend').innerHTML=leg.join('');
+  }
+}
+
+// Fleet map: one panel per cluster, rebuilt ONLY when that cluster's data changes
+// (per-panel signature) so a stable cluster's provisioning pulse runs smoothly.
+function renderFleet(st){
+  const host=document.getElementById('fleet');
+  const anyCrit=(st.clusters||[]).some(x=>(x.critical||0)>0); // label batch "displaced" ONLY when critical is contending (real preemption), not ordinary provisioning lag
+  (st.clusters||[]).forEach(c=>{
+    let panel=document.getElementById('cl-'+c.name);
+    if(!panel){ panel=document.createElement('div'); panel.className='panel cluster'; panel.id='cl-'+c.name; host.appendChild(panel); }
+    const s=JSON.stringify([c.nodesByCloud,c.podsPending,c.nodes,c.demand,c.critical,c.batchPending,anyCrit,c.dashboard]);
+    if(panel.dataset.sig===s) return; panel.dataset.sig=s;
+
+    let tiles='';
+    clouds.forEach(cl=>{ const n=(c.nodesByCloud||{})[cl]||0;
+      tiles+=Array.from({length:n}).map(()=>`<div class="tile" style="background:${CLOUD_COLORS[cl]}"></div>`).join(''); });
+    const bd=anyCrit?Math.max(0,c.batchPending||0):0, op=Math.max(0,(c.podsPending||0)-bd);
+    tiles+=Array.from({length:Math.min(bd,10)}).map(()=>`<div class="tile displaced" title="low-priority batch pod preempted (evicted from its node) to make room for critical work — now waiting"></div>`).join('');
+    tiles+=Array.from({length:Math.min(op,10)}).map(()=>`<div class="tile prov" title="pods pending — BigFleet is provisioning capacity"></div>`).join('');
+
+    const mix=clouds.filter(cl=>(c.nodesByCloud||{})[cl]).map(cl=>
+      `<span class="chip"><span class="dot" style="background:${CLOUD_COLORS[cl]}"></span>${cl} ${c.nodesByCloud[cl]}</span>`).join('')
+      || '<span class="chip" style="color:var(--muted)">no capacity yet</span>';
+    const dash=c.dashboard?`<button class="sm dash-btn" onclick="window.open('${c.dashboard}','_blank')">⎈ Open Kubernetes dashboard</button>`:'';
+
+    // Three distinct unit types, kept visually separate: NODES (capacity, the headline) →
+    // DEMAND/critical (the levels you set) → PENDING/displaced PODS (the pressure signal,
+    // only shown under load). 'running' pod count dropped — it dwarfed the capacity story.
+    // batchPending is a SUBSET of podsPending in the data, so split them into two non-overlapping
+    // signals: 'preempted' = batch pods evicted to free nodes for critical work (had a node, lost
+    // it to priority); 'pending' = the REMAINING demand that never got placed because the finite
+    // fleet is full. preempted + pending = total unschedulable.
+    const disp=(anyCrit&&(c.batchPending||0)>0)?c.batchPending:0;
+    const pend=Math.max(0,(c.podsPending||0)-disp);
+    const pressure=(pend>0||disp>0)
+      ? `<div class="stat">${pend>0?`<span title="demand the finite fleet has no room to place — never scheduled, waiting on capacity"><b>${pend}</b> pod${pend===1?'':'s'} pending</span>`:''}${disp>0?`<span class="disp" title="low-priority batch pods that were running and got PREEMPTED (evicted from their nodes) to make room for critical work — now waiting"><b>${disp}</b> batch preempted</span>`:''}</div>`
+      : '';
+    panel.innerHTML=
+      `<h3><span>${c.name}</span><span class="nodes-badge"><b>${c.nodes}</b> node${c.nodes===1?'':'s'}</span></h3>
+       <div class="mix">${mix}</div>
+       <div class="tiles">${tiles}</div>
+       <div class="crow"><div class="demand-ctl" id="demand-${c.name}">
+         <button class="sm" data-mutates onclick="bump('${c.name}',-5)">−</button>
+         <span class="lvl">demand ${c.demand}</span>
+         <button class="sm" data-mutates onclick="bump('${c.name}',5)">+</button></div>${c.critical>0?`<span class="crit-lvl">critical ${c.critical}</span>`:''}</div>
+       ${pressure}
+       ${dash}`;
+  });
+}
+
+function renderFeed(st){
+  const f=st.feed||[]; const s=JSON.stringify(f); if(s===sig.feed) return; sig.feed=s;
+  const el=document.getElementById('feed');
+  el.innerHTML=f.map((line,idx)=>`<div class="${idx<(f.length-lastFeedLen)?'new':''}">${line}</div>`).join('')||'<div style="color:var(--muted)">no decisions yet — press a button on the left</div>';
+  lastFeedLen=f.length;
+}
+
+function bump(ws,d){ const c=(last.clusters||[]).find(x=>x.name===ws); const lvl=Math.max(0,Math.min(40,(c?c.demand:0)+d)); setDemand(ws,lvl); }
+// tier defaults to 'demand' (standard production — preemptionPolicy:Never, provisions
+// rather than evicting batch). Section 4 passes 'critical' (preempts batch).
+function setDemand(ws,level,tier){ track('act:demand'); post('/api/demand',{workspace:ws,level:level,tier:tier||'demand'}); }
+// staged teaching scenarios: the backend drives the fleet to the required precondition
+// (full / contended) then injects the beat + narrates it, so the move/preempt/saturate beats
+// land every time. Fire both a bare and a name-tagged funnel event so /stats can tell the
+// lead payoff (move) apart from the table-stakes ones.
+function scenario(name){ track('act:scenario'); track('act:scenario:'+name); post('/api/scenario',{name:name}); }
+function resetDemo(){ post('/api/reset',{}); }
+function openDash(ws){ track('act:dashboard'); const c=(last.clusters||[]).find(x=>x.name===ws); if(c&&c.dashboard){ window.open(c.dashboard,'_blank'); } else { alert('dashboard for '+ws+' is still starting — try again in a moment'); } }
+function openFleetDash(){ track('act:fleet-dashboard'); if(last&&last.fleetDashboard){ window.open(last.fleetDashboard,'_blank'); } else { alert('BigFleet&rsquo;s dashboard is still starting — try again in a moment'); } }
+function post(u,b){ fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)}); }
+
+// ── Hosted-session clock ─────────────────────────────────────────────────────
+// A hosted session (created by demohost) runs for up to an hour and is reaped a few
+// minutes after the tab goes idle. We poll /api/session for the deadline, show a live
+// countdown in the top bar, and POST /api/heartbeat while the tab is visible so the
+// host knows someone is still here. When the deadline passes (or the host reaps us),
+// we show the "session ended" overlay. The standalone local demo reports hosted:false
+// and none of this shows. The countdown tracks the HARD 1h deadline — the idle clock
+// is just the reaper, and a visible tab keeps resetting it, so it never the headline.
+(function(){
+  let hardEndsAt=null;     // local ms timestamp of the hard deadline
+  let hosted=false, ended=false;
+  const bar=document.getElementById('sessionbar');
+  const clockEl=document.getElementById('sessionclock');
+  const noteEl=document.getElementById('sessionnote');
+  const overlay=document.getElementById('ended');
+
+  function showEnded(){
+    if(ended) return; ended=true;
+    bar.classList.remove('show');
+    overlay.classList.add('show');
+    try{ es.close(); }catch(_){}
+  }
+  function fmt(s){ s=Math.max(0,Math.round(s)); const m=Math.floor(s/60); return m+':'+String(s%60).padStart(2,'0'); }
+
+  async function sync(){
+    let st;
+    try{ st=await (await fetch('/api/session',{cache:'no-store'})).json(); }
+    catch(_){ if(hosted&&!ended) showEnded(); return; }   // host likely reaped us
+    if(!st.hosted){ hosted=false; bar.classList.remove('show'); return; }
+    hosted=true; bar.classList.add('show');
+    if(st.expired){ showEnded(); return; }
+    // anchor the hard deadline locally from same-payload server fields (no clock skew)
+    const hardRemainingMs=Date.parse(st.hardDeadline)-Date.parse(st.now);
+    hardEndsAt=Date.now()+hardRemainingMs;
+  }
+
+  function tick(){
+    if(!hosted||ended||hardEndsAt==null) return;
+    const rem=(hardEndsAt-Date.now())/1000;
+    if(rem<=0){ showEnded(); return; }
+    clockEl.textContent=fmt(rem);
+    bar.classList.toggle('warn', rem<=300 && rem>60);
+    bar.classList.toggle('crit', rem<=60);
+    if(rem<=300) noteEl.textContent='wrapping up soon — reload any time for a fresh session';
+  }
+
+  async function heartbeat(){
+    if(!hosted||ended||document.visibilityState!=='visible') return;
+    try{ await fetch('/api/heartbeat',{method:'POST'}); }catch(_){}
+  }
+
+  sync();                                   // initial: hosted? deadline?
+  setInterval(tick,1000);                   // 1s countdown
+  setInterval(sync,60000);                  // resync (drift + server-side expiry/reap)
+  setInterval(heartbeat,20000);             // keep-alive while visible
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'){ heartbeat(); sync(); } });
+})();
+</script>
+</body>
+</html>
