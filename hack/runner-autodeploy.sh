@@ -184,3 +184,6 @@ fi
 #   PLIST
 #   launchctl bootout "gui/$(id -u)/sh.lucy.bigfleet.autodeploy" 2>/dev/null
 #   launchctl bootstrap "gui/$(id -u)" "$P"
+#
+# Optional: to post a deploy/<RUNNER> commit status on each deploy, drop a GitHub fine-grained
+# PAT (Commit statuses: write on this repo only) at secrets/gh-token.key (gitignored). Absent = no-op.
